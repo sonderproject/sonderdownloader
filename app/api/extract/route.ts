@@ -304,15 +304,7 @@ async function tryPlaywright(
   }
 }
 
-export async function POST(req: NextRequest) {
-  let body: { url?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
-  }
-
-  const rawUrl = body.url?.trim();
+async function handle(rawUrl: string | undefined) {
   if (!rawUrl) {
     return NextResponse.json(
       { error: "Please paste a Zillow listing URL." },
@@ -402,4 +394,20 @@ function respond(hashes: string[], target: string, notes: string[]) {
     sourceUrl: target,
     strategies: notes,
   });
+}
+
+export async function POST(req: NextRequest) {
+  let body: { url?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
+  }
+  return handle(body.url?.trim());
+}
+
+// GET is accepted only for ergonomic testing / linkable debug via
+// `?url=<encoded zillow url>`. No side effects; same output as POST.
+export async function GET(req: NextRequest) {
+  return handle(req.nextUrl.searchParams.get("url") ?? undefined);
 }

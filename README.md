@@ -1,106 +1,83 @@
-# Sonder — Real Estate Downloader
+# Sonder Real Estate Downloader
 
-A one-screen web tool that turns a Zillow listing URL into a zip of every
-listing photo at max resolution. Built for feeding AI video generators
-(Kling, Higgsfield, etc.).
+Paste a Zillow listing URL → get every photo at max resolution as a
+single zip. Built for feeding AI video generators (Kling, Higgsfield).
 
-- Next.js 14 (App Router) + TypeScript + Tailwind
-- `playwright-core` + `@sparticuz/chromium-min` for serverless-friendly
-  headless rendering (needed because Zillow uses PerimeterX bot detection)
-- Stateless — no auth, no database, nothing kept server-side after each
-  request
+## Setup (2 minutes, one-time)
+
+Zillow is protected by PerimeterX, and Vercel's serverless functions
+egress from AWS IPs that get blocked at the network layer. The only
+reliable way to get through is via a scraping service — someone else's
+residential-IP infra doing the anti-bot bypass. **ScrapingBee** has the
+easiest signup and a generous free tier.
+
+1. **Sign up free** at https://app.scrapingbee.com/register (1000
+   free credits — plenty for personal use)
+2. **Copy your API key** from the ScrapingBee dashboard
+3. **On Vercel** → Project → Settings → Environment Variables → add
+   `SCRAPINGBEE_API_KEY` = your key. Apply to Production.
+4. **Redeploy** (or push any commit) and try a listing.
+
+That's it. You're set.
+
+### Alt scraping services
+
+`SCRAPINGBEE_API_KEY` is the recommended one, but the extractor also
+picks up `ZENROWS_API_KEY` (https://app.zenrows.com/register — 1000
+free credits) or `SCRAPERAPI_KEY` (https://www.scraperapi.com/signup —
+5000 free credits/month) if you'd rather use those.
 
 ## How it works
 
-`POST /api/extract` runs a **three-strategy pipeline**, first hit wins:
+`POST /api/extract` runs a strategy pipeline, first hit wins:
 
-1. **Wayback Machine.** Query `archive.org/wayback/available` for the
-   closest snapshot, then fetch the raw archived HTML via the `id_`
-   identifier and regex out every `photos.zillowstatic.com/fp/<hash>`
-   URL. Zero bot detection, no browser cold-start, works from anywhere.
-   Photo hashes don't rotate, so archived hashes still resolve today.
-2. **ZenRows** (only if `ZENROWS_API_KEY` env var is set on Vercel).
-   Routes the request through residential/premium IPs with native
-   PerimeterX bypass. Free tier is 1000 requests. This is the reliable
-   path when Vercel's datacenter IP gets blocked.
-3. **Playwright direct.** Boots `@sparticuz/chromium-min` on serverless
-   with stealth patches and manual headers. Often blocked on Vercel's
-   AWS IP by PerimeterX — kept as a last-resort fallback.
+1. **Wayback Machine (existing snapshot).** Free bonus round: if
+   archive.org already has a snapshot of the listing, we regex the
+   photo hashes out of it. Zillow hashes don't rotate, so archived
+   hashes still resolve on `photos.zillowstatic.com` today. Works for
+   popular listings; misses low-traffic ones.
+2. **ScrapingBee → ZenRows → ScraperAPI.** Whichever key is set, we
+   route the request through the service with `stealth_proxy=true` /
+   `antibot=true`. Residential IP, real anti-bot bypass. This is the
+   reliable path.
 
-Whichever strategy returns hashes wins. Hashes are rebuilt at max
+Whichever step returns photo hashes wins. Each hash is rebuilt at max
 resolution (`cc_ft_1536`) and returned to the browser, which shows a
 lazy-loaded thumbnail grid.
 
-On **Download Archive (.zip)**, `POST /api/download` streams the photos
+On **Download Archive (.zip)**, `POST /api/download` streams each photo
 server-side into a zip named `<address-slug>.zip`. A `Referer` header
-pointing at the original listing is sent with each image request so CDNs
-don't refuse.
+pointing at the original listing is sent with each image request so
+CDNs don't refuse.
 
-### The Vercel datacenter-IP problem
-
-PerimeterX (now HUMAN) flags AWS/Vercel IP ranges aggressively, so even
-perfect browser stealth often gets blocked. That's why Wayback is the
-first strategy: it doesn't hit Zillow from your IP. For listings without
-snapshots, add `ZENROWS_API_KEY` on Vercel to unlock the residential-IP
-path — signup is free at https://app.zenrows.com/register.
-
-## Local setup
+## Local dev
 
 ```bash
 npm install
-cp .env.example .env.local   # optional overrides
+cp .env.example .env.local   # add your SCRAPINGBEE_API_KEY here
 npm run dev
 ```
 
-Local dev uses whatever system Chromium you have. If Playwright can't
-find one, either install a Chromium binary or set
-`CHROMIUM_EXECUTABLE_PATH` in `.env.local` to point at one.
+## Vercel deploy notes
 
-## Deploying to Vercel
-
-> **Vercel Pro (or higher) is required.**
->
-> Extraction routinely takes 20–40 seconds — headless browser boot plus
-> the render/wait cycle. The Hobby tier caps serverless functions at
-> 10 seconds, so you'll get timeouts on the extract route. Both API
-> routes are configured with `maxDuration = 60` (`app/api/extract/route.ts`
-> and `app/api/download/route.ts`); on Hobby, Vercel silently clamps this
-> back to 10s and requests will fail.
-
-Steps:
-
-1. Push this repo to GitHub.
-2. Import it into Vercel.
-3. Confirm the project is on the **Pro** plan (or above).
-4. Deploy. No env vars are required for defaults; override
-   `CHROMIUM_PACK_URL` only if you want to pin/mirror the Chromium pack.
-
-## Notes on scraping
-
-- Zillow ships `photos.zillowstatic.com` URLs with a size suffix
-  (`cc_ft_384`, `cc_ft_768`, `cc_ft_1152`, `cc_ft_1536`). The extractor
-  dedupes by hash and rewrites every URL to `cc_ft_1536` for max
-  resolution. Individual image files aren't bot-checked — only the
-  listing page itself is.
-- If extraction returns zero photos, the API responds with
-  `"Zillow blocked this request — try again in a minute."` — usually a
-  transient PerimeterX challenge. Retry, or wait a beat.
-- No rate limiter is baked in beyond the frontend loading state that
-  disables the submit button until the request finishes. This is a
-  personal utility, not a public service.
+- `/api/extract` and `/api/download` are both configured with
+  `maxDuration = 60`. Vercel Hobby caps functions at 10s and silently
+  clamps this back — you need **Vercel Pro** (or higher) for the
+  timeouts to actually apply. The extract call can take 10–30s during
+  the anti-bot round trip.
+- No Chromium binary or heavy deps to bundle — this used to try running
+  headless Chromium on Vercel via `@sparticuz/chromium-min` and it was
+  a nightmare (fragile launch, IP blocks anyway). The scraping-service
+  path is far simpler and actually works.
 
 ## Project layout
 
 ```
 app/
-  page.tsx              # single-screen UI
+  page.tsx              # one-screen UI (sonderproject.co design tokens)
   layout.tsx
   globals.css
   api/
-    extract/route.ts    # headless-browser scrape → photo URL list
-    download/route.ts   # fetches + streams a zip of photos
+    extract/route.ts    # strategy pipeline → returns photo URLs
+    download/route.ts   # fetches + streams zip of photos
 ```
-
-## License
-
-Personal use. Respect Zillow's terms and use responsibly.

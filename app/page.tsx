@@ -8,7 +8,7 @@ type ExtractResponse = {
   sourceUrl: string;
 };
 
-type ApiError = { error: string };
+type ApiError = { error: string; needsApiKey?: boolean };
 
 export default function Home() {
   const [url, setUrl] = useState("");
@@ -16,11 +16,13 @@ export default function Home() {
   const [zipping, setZipping] = useState(false);
   const [result, setResult] = useState<ExtractResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [needsApiKey, setNeedsApiKey] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (loading) return;
     setError(null);
+    setNeedsApiKey(false);
     setResult(null);
     setLoading(true);
     try {
@@ -36,6 +38,7 @@ export default function Home() {
             ? data.error
             : "Something went wrong. Please try again.",
         );
+        if ("needsApiKey" in data && data.needsApiKey) setNeedsApiKey(true);
         return;
       }
       setResult(data);
@@ -169,8 +172,36 @@ export default function Home() {
           </form>
 
           {error && (
-            <div className="mt-6 glass px-5 py-4 border-l-2 border-l-accent text-text-dim text-sm font-sans max-w-2xl">
+            <div className="mt-6 glass px-5 py-4 border-l-2 border-l-accent text-text-dim text-sm font-sans max-w-2xl leading-relaxed">
               {error}
+              {needsApiKey && (
+                <div className="mt-4 pt-4 border-t border-white/10 text-xs">
+                  <p className="microlabel mb-2">Setup — 2 minutes</p>
+                  <ol className="space-y-1 text-text-dim">
+                    <li>
+                      1. Sign up free at{" "}
+                      <a
+                        href="https://app.scrapingbee.com/register"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-accent-bright hover:underline"
+                      >
+                        scrapingbee.com/register
+                      </a>{" "}
+                      (1000 free credits)
+                    </li>
+                    <li>
+                      2. Copy your API key from the ScrapingBee dashboard
+                    </li>
+                    <li>
+                      3. In your Vercel project → Settings → Environment
+                      Variables, add{" "}
+                      <code className="text-text">SCRAPINGBEE_API_KEY</code>
+                    </li>
+                    <li>4. Redeploy, then try again.</li>
+                  </ol>
+                </div>
+              )}
             </div>
           )}
 

@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #FBF8F1;
+  --foreground: #0B2545;
+}
+
+html,
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-feature-settings: "ss01", "ss02";
+}
+
+body {
+  min-height: 100vh;
+  background-image:
+    radial-gradient(
+      ellipse 80% 50% at 50% -10%,
+      rgba(58, 175, 169, 0.08),
+      transparent 60%
+    ),
+    radial-gradient(
+      ellipse 60% 40% at 90% 110%,
+      rgba(11, 37, 69, 0.06),
+      transparent 60%
+    );
+}
+
+.font-serif {
+  font-feature-settings: "ss01", "onum";
+  letter-spacing: -0.01em;
+}
+
+/* Subtle ocean-depth divider */
+.divider-depth {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    rgba(11, 37, 69, 0.15),
+    transparent
+  );
+}

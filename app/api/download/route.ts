@@ -21,6 +21,40 @@ function pad(n: number, width: number): string {
   return String(n).padStart(width, "0");
 }
 
+const PHOTO_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+    "Chrome/131.0.0.0 Safari/537.36",
+  Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+};
+
+// Not every photo exists at cc_ft_1536 — older listings top out at
+// smaller sizes. Fall back down the ladder instead of dropping the
+// photo from the zip.
+const SIZE_LADDER = ["cc_ft_1536", "cc_ft_960", "cc_ft_576"];
+
+async function fetchPhotoWithFallback(
+  url: string,
+  referer: string,
+): Promise<Response | null> {
+  const candidates = [
+    url,
+    ...SIZE_LADDER.map((s) => url.replace(/cc_ft_\d+/, s)),
+  ].filter((u, i, arr) => arr.indexOf(u) === i);
+  for (const candidate of candidates) {
+    try {
+      const res = await fetch(candidate, {
+        headers: { ...PHOTO_HEADERS, Referer: referer },
+      });
+      if (res.ok && res.body) return res;
+    } catch {
+      // Try the next size down.
+    }
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   let body: Body;
   try {
@@ -71,19 +105,9 @@ export async function POST(req: NextRequest) {
       for (let i = 0; i < photos.length; i++) {
         const url = photos[i];
         try {
-          const res = await fetch(url, {
-            headers: {
-              Referer: referer,
-              "User-Agent":
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-                "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                "Chrome/131.0.0.0 Safari/537.36",
-              Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            },
-          });
-
-          if (!res.ok || !res.body) {
-            console.warn(`skip photo ${i + 1}: HTTP ${res.status}`);
+          const res = await fetchPhotoWithFallback(url, referer);
+          if (!res) {
+            console.warn(`skip photo ${i + 1}: all sizes failed`);
             continue;
           }
 

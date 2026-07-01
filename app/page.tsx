@@ -5,8 +5,10 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useCallback,
   FormEvent,
   ChangeEvent,
+  ClipboardEvent as ReactClipboardEvent,
 } from "react";
 import {
   DndContext,
@@ -66,6 +68,28 @@ function slugFromZillowText(text: string): string {
   return "listing";
 }
 
+// Rebuild the canonical listing URL from page source so the zip's
+// Referer header points at the real listing, not the zillow.com root.
+function sourceUrlFromHtml(text: string): string | undefined {
+  const m = text.match(/\/homedetails\/([a-zA-Z0-9-]+)\/(\d+)_zpid/);
+  if (m) return `https://www.zillow.com/homedetails/${m[1]}/${m[2]}_zpid/`;
+  return undefined;
+}
+
+// If the text is a single zillow.com URL, return it normalized; else null.
+function asZillowUrl(text: string): string | null {
+  const t = text.trim();
+  if (!t || /\s/.test(t)) return null;
+  try {
+    const u = new URL(t);
+    return /(^|\.)zillow\.com$/i.test(u.hostname) ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+const SESSION_KEY = "sonder-session-v1";
+
 function hashesToPhotos(hashes: string[]): Photo[] {
   return hashes.map((h) => ({
     id: h,
@@ -108,6 +132,13 @@ function PhotoCard({
           alt={`Photo ${index + 1}`}
           loading="lazy"
           draggable={false}
+          onError={(e) => {
+            // The 1536 size doesn't exist for every photo — retry via the
+            // proxy, which walks the size ladder.
+            const el = e.currentTarget;
+            const proxied = `/api/img?url=${encodeURIComponent(photo.url)}`;
+            if (!el.src.includes("/api/img")) el.src = proxied;
+          }}
           className="w-full h-full object-cover select-none pointer-events-none"
         />
         <span className="absolute top-2 left-2 microlabel text-[9px] text-text bg-black/60 px-2 py-1 rounded-sonder">
@@ -142,6 +173,7 @@ export default function Home() {
   const [pastedHtml, setPastedHtml] = useState("");
   const [url, setUrl] = useState("");
   const [zipping, setZipping] = useState(false);
+  const [zipBytes, setZipBytes] = useState(0);
   const [loading, setLoading] = useState(false);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [slug, setSlug] = useState<string>("listing");
@@ -177,54 +209,84 @@ export default function Home() {
     };
   }, []);
 
-  // Bookmarklet drop-in: read hashes from URL fragment on mount.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  // Bookmarklet drop-in: read hashes from the URL fragment.
+  const ingestFragment = useCallback((): boolean => {
     const hash = window.location.hash;
-    if (!hash) return;
+    if (!hash) return false;
     const params = new URLSearchParams(hash.slice(1));
     const list = params.get("photos");
     const s = params.get("slug") || "listing";
-    if (list) {
-      const hashes = list.split(",").filter((h) => /^[a-zA-Z0-9]{8,}$/.test(h));
-      if (hashes.length > 0) {
-        setPhotos(hashesToPhotos(hashes));
-        setSlug(s);
-        history.replaceState(null, "", window.location.pathname);
+    const src = params.get("url");
+    if (!list) return false;
+    const hashes = list.split(",").filter((h) => /^[a-zA-Z0-9]{8,}$/.test(h));
+    if (hashes.length === 0) return false;
+    setPhotos(hashesToPhotos(hashes));
+    setSlug(s);
+    setSourceUrl(
+      src && /^https:\/\/(www\.)?zillow\.com\//i.test(src) ? src : undefined,
+    );
+    setVideoResult(null);
+    setError(null);
+    history.replaceState(null, "", window.location.pathname);
+    return true;
+  }, []);
+
+  // On mount: fragment wins; otherwise restore the previous session so
+  // a refresh doesn't lose photo order and room labels. Also listen for
+  // hashchange — clicking a bookmarklet link into an already-open tab
+  // is a same-document navigation that never remounts.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.addEventListener("hashchange", ingestFragment);
+    if (!ingestFragment()) {
+      try {
+        const raw = sessionStorage.getItem(SESSION_KEY);
+        const saved = raw
+          ? (JSON.parse(raw) as {
+              photos?: Photo[];
+              slug?: string;
+              sourceUrl?: string;
+            })
+          : null;
+        if (saved && Array.isArray(saved.photos) && saved.photos.length > 0) {
+          setPhotos(saved.photos);
+          setSlug(saved.slug || "listing");
+          setSourceUrl(saved.sourceUrl || undefined);
+        }
+      } catch {
+        // Corrupt session state — start fresh.
       }
     }
-  }, []);
+    return () => window.removeEventListener("hashchange", ingestFragment);
+  }, [ingestFragment]);
 
-  const bookmarklet = useMemo(() => {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const code = `(function(){var h=new Set(),o=[];var re=/photos\\.zillowstatic\\.com\\/fp\\/([a-zA-Z0-9]{8,})-cc_ft_\\d+\\.(?:jpg|webp)/g;var s=document.documentElement.outerHTML,m;while((m=re.exec(s))){if(!h.has(m[1])){h.add(m[1]);o.push(m[1]);}}var slug=(location.pathname.match(/\\/homedetails\\/([^\\/]+)/)||[])[1]||'listing';if(!o.length){alert('No Zillow photos found on this page. Open a listing detail page first.');return;}window.open('${origin}/#photos='+o.join(',')+'&slug='+encodeURIComponent(slug.toLowerCase()),'_blank');})();`;
-    return "javascript:" + code;
-  }, []);
-
-  function handlePasteSubmit(e: FormEvent) {
-    e.preventDefault();
-    setError(null);
-    if (!pastedHtml.trim()) {
-      setError("Paste the Zillow page source into the box below.");
-      return;
-    }
-    const hashes = extractHashesFromHtml(pastedHtml);
-    if (hashes.length === 0) {
-      setError(
-        "No Zillow photo URLs found in that HTML. Make sure you pasted the full page source from a listing detail page.",
+  // Persist the working set so refreshes are seamless.
+  useEffect(() => {
+    if (photos.length === 0) return;
+    try {
+      sessionStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ photos, slug, sourceUrl }),
       );
-      return;
+    } catch {
+      // Storage full or unavailable — persistence is best-effort.
     }
-    setPhotos(hashesToPhotos(hashes));
-    setSlug(slugFromZillowText(pastedHtml));
-    setSourceUrl(undefined);
-    setPastedHtml("");
-    setVideoResult(null);
-  }
+  }, [photos, slug, sourceUrl]);
 
-  async function handleUrlSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (loading) return;
+  // Ingest raw page source: extract photos, slug, and source URL.
+  const ingestHtml = useCallback((html: string): boolean => {
+    const hashes = extractHashesFromHtml(html);
+    if (hashes.length === 0) return false;
+    setPhotos(hashesToPhotos(hashes));
+    setSlug(slugFromZillowText(html));
+    setSourceUrl(sourceUrlFromHtml(html));
+    setVideoResult(null);
+    setError(null);
+    return true;
+  }, []);
+
+  const extractFromUrl = useCallback(async (target: string) => {
+    if (!target) return;
     setError(null);
     setLoading(true);
     setVideoResult(null);
@@ -232,7 +294,7 @@ export default function Home() {
       const res = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: url.trim() }),
+        body: JSON.stringify({ url: target }),
       });
       const data = await res.json();
       if (!res.ok || data.error) {
@@ -253,11 +315,93 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Route pasted text to the right flow: a Zillow URL hits the URL
+  // pipeline, page source is extracted instantly. Returns true if handled.
+  const ingestText = useCallback(
+    (text: string): boolean => {
+      const u = asZillowUrl(text);
+      if (u) {
+        setMode("url");
+        setUrl(u);
+        void extractFromUrl(u);
+        return true;
+      }
+      return ingestHtml(text);
+    },
+    [extractFromUrl, ingestHtml],
+  );
+
+  // Paste anywhere on the page — no need to focus an input first.
+  useEffect(() => {
+    function onPaste(e: ClipboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      const text = e.clipboardData?.getData("text") ?? "";
+      if (text && ingestText(text)) e.preventDefault();
+    }
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [ingestText]);
+
+  const bookmarklet = useMemo(() => {
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const code = `(function(){var h=new Set(),o=[];var re=/photos\\.zillowstatic\\.com\\/fp\\/([a-zA-Z0-9]{8,})-cc_ft_\\d+\\.(?:jpg|webp)/g;var s=document.documentElement.outerHTML,m;while((m=re.exec(s))){if(!h.has(m[1])){h.add(m[1]);o.push(m[1]);}}var slug=(location.pathname.match(/\\/homedetails\\/([^\\/]+)/)||[])[1]||'listing';if(!o.length){alert('No Zillow photos found on this page. Open a listing detail page first.');return;}window.open('${origin}/#photos='+o.join(',')+'&slug='+encodeURIComponent(slug.toLowerCase())+'&url='+encodeURIComponent(location.href),'_blank');})();`;
+    return "javascript:" + code;
+  }, []);
+
+  function handlePasteSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (!pastedHtml.trim()) {
+      setError("Paste the Zillow page source into the box below.");
+      return;
+    }
+    if (!ingestText(pastedHtml)) {
+      setError(
+        "No Zillow photo URLs found in that HTML. Make sure you pasted the full page source from a listing detail page.",
+      );
+      return;
+    }
+    setPastedHtml("");
+  }
+
+  // Extract the instant content lands in the box — no button click needed.
+  function handleTextareaPaste(e: ReactClipboardEvent<HTMLTextAreaElement>) {
+    const text = e.clipboardData.getData("text");
+    if (text && ingestText(text)) {
+      e.preventDefault();
+      setPastedHtml("");
+    }
+  }
+
+  // Someone pasted page source into the URL field — handle it anyway.
+  function handleUrlInputPaste(e: ReactClipboardEvent<HTMLInputElement>) {
+    const text = e.clipboardData.getData("text");
+    if (text && !asZillowUrl(text) && ingestHtml(text)) {
+      e.preventDefault();
+    }
+  }
+
+  function handleUrlSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (loading) return;
+    void extractFromUrl(url.trim());
   }
 
   async function handleDownloadZip() {
     if (photos.length === 0 || zipping) return;
     setZipping(true);
+    setZipBytes(0);
     try {
       const res = await fetch("/api/download", {
         method: "POST",
@@ -272,7 +416,26 @@ export default function Home() {
         setError("Could not build zip. Please try again.");
         return;
       }
-      const blob = await res.blob();
+      // Read the stream manually so we can show live progress — the zip
+      // is streamed with no Content-Length.
+      let blob: Blob;
+      const reader = res.body?.getReader();
+      if (reader) {
+        const chunks: BlobPart[] = [];
+        let received = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            received += value.length;
+            setZipBytes(received);
+          }
+        }
+        blob = new Blob(chunks, { type: "application/zip" });
+      } else {
+        blob = await res.blob();
+      }
       triggerDownload(blob, `${slug}.zip`);
     } catch {
       setError("Could not build zip. Please try again.");
@@ -362,8 +525,11 @@ export default function Home() {
         videoAR === "16:9"
           ? [DEFAULT_VIDEO_OPTIONS.width, DEFAULT_VIDEO_OPTIONS.height]
           : [1080, 1920];
+      // Load frames through the same-origin proxy: guarantees canvas
+      // pixel access (the CDN sends no CORS headers) and falls back to
+      // smaller sizes when 1536 is missing.
       const result = await renderWalkthroughVideo(
-        photos.map((p) => p.url),
+        photos.map((p) => `/api/img?url=${encodeURIComponent(p.url)}`),
         { width: w, height: h, secondsPerPhoto },
         setVideoProgress,
       );
@@ -490,14 +656,16 @@ export default function Home() {
                   onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
                     setPastedHtml(e.target.value)
                   }
-                  placeholder="Paste the full page source of a Zillow listing here…"
+                  onPaste={handleTextareaPaste}
+                  placeholder="Paste the page source — or just a Zillow URL — extraction starts instantly…"
                   spellCheck={false}
                   className="w-full h-40 px-4 py-3 bg-black/25 border border-white/10 rounded-sonder-lg text-text placeholder:text-text-subtle font-mono text-xs leading-relaxed focus:outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20 transition"
                 />
                 <div className="mt-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                   <p className="microlabel text-[10px] opacity-80 max-w-md">
                     On the listing: right-click → View Page Source →
-                    Ctrl/Cmd+A → Ctrl/Cmd+C → paste here.
+                    Ctrl/Cmd+A → Ctrl/Cmd+C — then paste anywhere on this
+                    page. Photos extract on paste.
                   </p>
                   <button
                     type="submit"
@@ -554,6 +722,7 @@ export default function Home() {
                     spellCheck={false}
                     value={url}
                     onChange={(e) => setUrl(e.target.value)}
+                    onPaste={handleUrlInputPaste}
                     placeholder="https://www.zillow.com/homedetails/…"
                     className="flex-1 px-4 py-4 bg-black/25 border border-white/10 rounded-sonder-lg text-text placeholder:text-text-subtle font-sans text-base md:text-lg focus:outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20 transition"
                     disabled={loading}
@@ -614,7 +783,11 @@ export default function Home() {
                   disabled={zipping}
                   className="btn-ghost"
                 >
-                  {zipping ? "Zipping…" : "Download Photos .zip"}
+                  {zipping
+                    ? zipBytes > 0
+                      ? `Zipping… ${(zipBytes / 1_000_000).toFixed(1)} MB`
+                      : "Zipping…"
+                    : "Download Photos .zip"}
                 </button>
                 <button
                   onClick={handleCopyPrompts}

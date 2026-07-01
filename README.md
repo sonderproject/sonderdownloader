@@ -12,18 +12,26 @@ blocked — so the extraction happens in your browser instead.
 
 1. Open the Zillow listing in a normal browser tab
 2. Right-click → **View Page Source** (or Ctrl/Cmd + U)
-3. Select all → copy → paste into the "Paste HTML" box on this app
-4. Click **Extract Photos**, then **Download Archive**
+3. Select all → copy → paste **anywhere on this app's page**
 
-The tool regexes photo URLs client-side and rebuilds them at max
-resolution (`cc_ft_1536`). Zip generation happens server-side because
-the `photos.zillowstatic.com` CDN is unprotected — that hop is fine.
+Extraction runs the instant you paste — no textarea focus, no button
+click. The app auto-detects what you pasted: page source is regexed
+for photo URLs client-side; a bare Zillow URL is routed to the URL
+fallback pipeline instead. The listing's canonical URL is also pulled
+from the source so the zip's `Referer` points at the real listing.
+
+Photo URLs are rebuilt at max resolution (`cc_ft_1536`), with a
+server-side fallback ladder (960 → 576) for older photos that don't
+exist at 1536 — nothing gets silently dropped. Zip generation happens
+server-side because the `photos.zillowstatic.com` CDN is unprotected —
+that hop is fine.
 
 ### 2. Bookmarklet (one click on any Zillow tab)
 
 Drag the **"↴ Sonder — Zillow Photos"** button from the app to your
 bookmarks bar. On any Zillow listing, click the bookmark — a new tab
-opens with all photos already extracted and ready to download.
+opens with all photos already extracted, plus the listing URL so the
+zip download sends an accurate `Referer`.
 
 ### 3. URL fallback
 
@@ -37,7 +45,16 @@ fallback for users who set up a service key.
 `POST /api/download` fetches each photo server-side and streams a
 `<address-slug>.zip`. A `Referer` header pointing at the listing is
 sent so the CDN doesn't refuse. This works fine even without any API
-key because `photos.zillowstatic.com` is a plain CDN.
+key because `photos.zillowstatic.com` is a plain CDN. The UI shows
+live progress (MB received) while the zip streams.
+
+## Other seamlessness details
+
+- **Session restore** — photos, drag order, and room labels persist in
+  `sessionStorage`, so an accidental refresh doesn't lose your work.
+- **`/api/img` proxy** — thumbnails fall back to it when a size is
+  missing, and the Ken-Burns renderer loads all frames through it so
+  canvas pixel access never hits a CORS wall.
 
 ## Local dev
 

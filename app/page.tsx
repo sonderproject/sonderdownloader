@@ -37,6 +37,7 @@ import {
   VideoProgress,
   DEFAULT_VIDEO_OPTIONS,
 } from "@/lib/video";
+import type { ClassifyProgress } from "@/lib/classify";
 
 type Photo = {
   id: string;
@@ -158,6 +159,10 @@ export default function Home() {
   } | null>(null);
   const [videoAR, setVideoAR] = useState<"16:9" | "9:16">("16:9");
   const [secondsPerPhoto, setSecondsPerPhoto] = useState(4);
+
+  // Auto-classifier state
+  const [classifyBusy, setClassifyBusy] = useState(false);
+  const [classifyProgress, setClassifyProgress] = useState<ClassifyProgress | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -290,6 +295,36 @@ export default function Home() {
     setPhotos((items) =>
       items.map((p) => (p.id === id ? { ...p, room } : p)),
     );
+  }
+
+  async function handleAutoClassify() {
+    if (classifyBusy || photos.length === 0) return;
+    setError(null);
+    setClassifyBusy(true);
+    setClassifyProgress({ phase: "loading-model", progress: 0 });
+    try {
+      // Lazy import so Transformers.js is not in the initial page bundle.
+      const { classifyPhotos } = await import("@/lib/classify");
+      const results = await classifyPhotos(
+        photos.map((p) => ({ id: p.id, url: p.url })),
+        setClassifyProgress,
+      );
+      const byId = new Map(results.map((r) => [r.id, r.room]));
+      setPhotos((items) =>
+        items.map((p) =>
+          byId.has(p.id) ? { ...p, room: byId.get(p.id)! } : p,
+        ),
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Auto-classify failed: ${err.message}`
+          : "Auto-classify failed.",
+      );
+    } finally {
+      setClassifyBusy(false);
+      setClassifyProgress(null);
+    }
   }
 
   function handleSortWalkthrough() {
@@ -560,6 +595,14 @@ export default function Home() {
 
               <div className="flex flex-wrap gap-2 mb-6">
                 <button
+                  onClick={handleAutoClassify}
+                  disabled={classifyBusy}
+                  className="btn-primary"
+                  title="Auto-label each photo by room using CLIP (in-browser, ~150 MB one-time download)"
+                >
+                  {classifyBusy ? "Classifying…" : "Auto-classify Photos"}
+                </button>
+                <button
                   onClick={handleSortWalkthrough}
                   className="btn-ghost"
                   title="Reorder photos by canonical walkthrough sequence"
@@ -583,9 +626,31 @@ export default function Home() {
               </div>
 
               <p className="microlabel text-[10px] opacity-80 mb-4">
-                Drag tiles to reorder. Set a category on each so the auto-sort
-                and prompts know what each room is.
+                Auto-classify labels every photo. Then drag tiles or click Sort
+                to Walkthrough. First run downloads a ~150 MB vision model
+                (cached forever).
               </p>
+
+              {classifyBusy && classifyProgress && (
+                <div className="mb-6 glass px-5 py-4">
+                  <div className="microlabel mb-2">
+                    {classifyProgress.phase === "loading-model"
+                      ? `Downloading CLIP model — ${Math.round(classifyProgress.progress * 100)}%`
+                      : `Classifying photo ${classifyProgress.index} / ${classifyProgress.total}`}
+                  </div>
+                  <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-accent transition-[width]"
+                      style={{
+                        width:
+                          classifyProgress.phase === "loading-model"
+                            ? `${Math.round(classifyProgress.progress * 100)}%`
+                            : `${Math.round((classifyProgress.index / Math.max(1, classifyProgress.total)) * 100)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
 
               <DndContext
                 sensors={sensors}

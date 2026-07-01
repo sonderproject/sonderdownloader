@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import chromiumPack from "@sparticuz/chromium-min";
-// playwright-extra wraps playwright-core so we can attach the stealth
-// plugin from the puppeteer-extra ecosystem (they share the same plugin
-// interface). This adds ~20 evasions on top of what we can do by hand.
-import { chromium as extraChromium } from "playwright-extra";
+// playwright-extra can't auto-discover playwright-core inside a Next.js
+// serverless bundle, so hand it the browser type explicitly via addExtra.
+import { chromium as playwrightChromium } from "playwright-core";
+import { addExtra } from "playwright-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 
+const extraChromium = addExtra(playwrightChromium);
 extraChromium.use(StealthPlugin());
 
 export const runtime = "nodejs";

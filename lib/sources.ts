@@ -14,11 +14,24 @@ export const SOURCE_LABEL: Record<SourceKey, string> = {
   realtor: "Realtor.com",
 };
 
+// Listing facts scraped from embedded JSON/JSON-LD. Everything is a
+// display string and everything is optional — extraction is
+// best-effort and the UI lets the user edit each field.
+export type ListingFacts = {
+  address?: string;
+  price?: string;
+  beds?: string;
+  baths?: string;
+  sqft?: string;
+  description?: string;
+};
+
 export type ExtractedListing = {
   source: SourceKey;
   photos: string[]; // full-res photo URLs, deduped, in page order
   slug: string;
   sourceUrl?: string;
+  facts: ListingFacts;
 };
 
 function dedupe(urls: string[]): string[] {
@@ -32,6 +45,89 @@ function sanitizeSlug(raw: string): string {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "listing"
   );
+}
+
+function titleCaseSlug(slug: string): string {
+  return slug
+    .split("-")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+function unescapeJsonString(s: string): string {
+  return s
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) =>
+      String.fromCharCode(parseInt(h, 16)),
+    )
+    .replace(/\\n/g, " ")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Best-effort listing facts from the embedded JSON all three sites
+// ship (JSON-LD and/or their own state blobs). Field names differ per
+// site, so each fact tries a small set of known keys. Every value is
+// sanity-checked; anything that doesn't parse is simply omitted and
+// the user can fill it in by hand.
+function extractFacts(html: string, slug: string): ListingFacts {
+  const facts: ListingFacts = {};
+
+  const street = html.match(/"streetAddress"\s*:\s*"([^"]{3,80})"/);
+  const city = html.match(/"addressLocality"\s*:\s*"([^"]{2,40})"/);
+  const region = html.match(/"addressRegion"\s*:\s*"([A-Z]{2})"/);
+  const zip = html.match(/"postalCode"\s*:\s*"(\d{5}(?:-\d{4})?)"/);
+  if (street) {
+    facts.address = [
+      unescapeJsonString(street[1]),
+      city ? unescapeJsonString(city[1]) : undefined,
+      [region?.[1], zip?.[1]].filter(Boolean).join(" ") || undefined,
+    ]
+      .filter(Boolean)
+      .join(", ");
+  } else if (slug !== "listing") {
+    facts.address = titleCaseSlug(slug);
+  }
+
+  const price = html.match(
+    /"(?:price|listPrice|priceValue)"\s*:\s*"?\$?([\d,]{4,12})(?:\.\d+)?"?/i,
+  );
+  if (price) {
+    const n = Number(price[1].replace(/,/g, ""));
+    if (n >= 10_000 && n <= 500_000_000) {
+      facts.price = `$${n.toLocaleString("en-US")}`;
+    }
+  }
+
+  const beds = html.match(
+    /"(?:bedrooms|beds|numBedrooms)"\s*:\s*"?(\d{1,2})(?:\.\d+)?"?/i,
+  );
+  if (beds && Number(beds[1]) > 0) facts.beds = beds[1];
+
+  const baths = html.match(
+    /"(?:bathrooms|baths|bathsTotal|numBathrooms)"\s*:\s*"?(\d{1,2}(?:\.\d+)?)"?/i,
+  );
+  if (baths && Number(baths[1]) > 0) facts.baths = baths[1];
+
+  const sqft = html.match(
+    /"(?:livingArea|livingAreaValue|sqFt|squareFootage|floorSize)"\s*:\s*"?([\d,]{3,7})"?/i,
+  );
+  if (sqft) {
+    const n = Number(sqft[1].replace(/,/g, ""));
+    if (n >= 100 && n <= 100_000) facts.sqft = n.toLocaleString("en-US");
+  }
+
+  const desc = html.match(/"description"\s*:\s*"((?:[^"\\]|\\.){60,2000}?)"/);
+  if (desc) {
+    const text = unescapeJsonString(desc[1]);
+    // Reject blobs that are clearly markup or JSON, not prose.
+    if (!/[<{}]/.test(text.slice(0, 120))) {
+      facts.description = text.slice(0, 600);
+    }
+  }
+
+  return facts;
 }
 
 function extractZillow(html: string): ExtractedListing | null {
@@ -49,13 +145,15 @@ function extractZillow(html: string): ExtractedListing | null {
 
   const slugM = html.match(/\/homedetails\/([a-zA-Z0-9-]+)/);
   const srcM = html.match(/\/homedetails\/([a-zA-Z0-9-]+)\/(\d+)_zpid/);
+  const slug = slugM ? sanitizeSlug(slugM[1]) : "listing";
   return {
     source: "zillow",
     photos,
-    slug: slugM ? sanitizeSlug(slugM[1]) : "listing",
+    slug,
     sourceUrl: srcM
       ? `https://www.zillow.com/homedetails/${srcM[1]}/${srcM[2]}_zpid/`
       : undefined,
+    facts: extractFacts(html, slug),
   };
 }
 
@@ -80,6 +178,7 @@ function extractRedfin(html: string): ExtractedListing | null {
     photos,
     slug,
     sourceUrl: canonical ? canonical[0] : undefined,
+    facts: extractFacts(html, slug),
   };
 }
 
@@ -105,11 +204,13 @@ function extractRealtor(html: string): ExtractedListing | null {
   const canonical = html.match(
     /https:\/\/www\.realtor\.com\/realestateandhomes-detail\/([A-Za-z0-9_-]+)/,
   );
+  const slug = canonical ? sanitizeSlug(canonical[1]) : "listing";
   return {
     source: "realtor",
     photos,
-    slug: canonical ? sanitizeSlug(canonical[1]) : "listing",
+    slug,
     sourceUrl: canonical ? canonical[0] : undefined,
+    facts: extractFacts(html, slug),
   };
 }
 

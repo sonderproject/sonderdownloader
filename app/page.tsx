@@ -40,7 +40,13 @@ import {
   DEFAULT_VIDEO_OPTIONS,
 } from "@/lib/video";
 import type { ClassifyProgress } from "@/lib/classify";
-import { extractListing, SOURCE_LABEL } from "@/lib/sources";
+import {
+  extractListing,
+  SOURCE_LABEL,
+  ListingFacts,
+} from "@/lib/sources";
+import { buildCaptions, captionsFileText } from "@/lib/captions";
+import { renderCoverImage, Branding } from "@/lib/cover";
 
 type Photo = {
   id: string;
@@ -62,13 +68,45 @@ function asZillowUrl(text: string): string | null {
 
 const SESSION_KEY = "sonder-session-v1";
 const HISTORY_KEY = "sonder-history-v1";
+const BRANDING_KEY = "sonder-branding-v1";
 
 type HistoryEntry = {
   slug: string;
   sourceUrl?: string;
   photos: Photo[];
+  facts?: ListingFacts;
   ts: number;
 };
+
+// "123-main-st-anytown-ca-90210" → "123 Main St Anytown Ca 90210" —
+// a usable starting point when the source didn't carry a real address.
+function addressFromSlug(slug: string): string | undefined {
+  if (slug === "listing") return undefined;
+  return slug
+    .split("-")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+function listingFileText(
+  f: ListingFacts,
+  slug: string,
+  sourceUrl?: string,
+): string {
+  const rows = [
+    f.address && `Address: ${f.address}`,
+    f.price && `Price: ${f.price}`,
+    f.beds && `Beds: ${f.beds}`,
+    f.baths && `Baths: ${f.baths}`,
+    f.sqft && `SqFt: ${f.sqft}`,
+    sourceUrl && `Listing: ${sourceUrl}`,
+    f.description && `\n${f.description}`,
+  ].filter(Boolean);
+  return `Sonder listing — ${slug}\n\n${rows.join("\n")}`;
+}
+
+const fieldCls =
+  "w-full px-3 py-2 bg-black/25 border border-white/10 rounded-sonder text-text placeholder:text-text-subtle font-sans text-sm focus:outline-none focus:border-accent/60 transition";
 
 // Zip entry name: index plus the room label once classified, so the
 // archive reads 03_kitchen.jpg instead of photo_03.jpg.
@@ -186,12 +224,20 @@ export default function Home() {
   const [slug, setSlug] = useState<string>("listing");
   const [sourceUrl, setSourceUrl] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState<"bookmarklet" | "prompts" | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const [trashed, setTrashed] = useState<Photo[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [scrollTick, setScrollTick] = useState(0);
   const gridRef = useRef<HTMLDivElement | null>(null);
+
+  // Marketing-kit state
+  const [facts, setFacts] = useState<ListingFacts>({});
+  const [branding, setBranding] = useState<Branding>({});
+  const [music, setMusic] = useState<{ url: string; name: string } | null>(
+    null,
+  );
+  const [coverBusy, setCoverBusy] = useState(false);
 
   // Video generation state
   const [videoBusy, setVideoBusy] = useState(false);
@@ -256,6 +302,7 @@ export default function Home() {
     setSourceUrl(
       src && /^https:\/\/(www\.)?zillow\.com\//i.test(src) ? src : undefined,
     );
+    setFacts({ address: addressFromSlug(s) });
     setTrashed([]);
     setVideoResult(null);
     setError(null);
@@ -281,12 +328,14 @@ export default function Home() {
               photos?: Photo[];
               slug?: string;
               sourceUrl?: string;
+              facts?: ListingFacts;
             })
           : null;
         if (saved && Array.isArray(saved.photos) && saved.photos.length > 0) {
           setPhotos(saved.photos);
           setSlug(saved.slug || "listing");
           setSourceUrl(saved.sourceUrl || undefined);
+          setFacts(saved.facts ?? {});
         }
       } catch {
         // Corrupt session state — start fresh.
@@ -301,12 +350,38 @@ export default function Home() {
     try {
       sessionStorage.setItem(
         SESSION_KEY,
-        JSON.stringify({ photos, slug, sourceUrl }),
+        JSON.stringify({ photos, slug, sourceUrl, facts }),
       );
     } catch {
       // Storage full or unavailable — persistence is best-effort.
     }
-  }, [photos, slug, sourceUrl]);
+  }, [photos, slug, sourceUrl, facts]);
+
+  // Agent branding survives across listings.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(BRANDING_KEY);
+      if (raw) setBranding(JSON.parse(raw) as Branding);
+    } catch {
+      // Best-effort.
+    }
+  }, []);
+
+  function updateBranding(patch: Partial<Branding>) {
+    setBranding((b) => {
+      const next = { ...b, ...patch };
+      try {
+        localStorage.setItem(BRANDING_KEY, JSON.stringify(next));
+      } catch {
+        // Best-effort.
+      }
+      return next;
+    });
+  }
+
+  function updateFacts(patch: Partial<ListingFacts>) {
+    setFacts((f) => ({ ...f, ...patch }));
+  }
 
   // Recent-listings history lives in localStorage so it survives the
   // tab. Load once on mount…
@@ -332,7 +407,13 @@ export default function Home() {
   useEffect(() => {
     if (photos.length === 0) return;
     setHistory((prev) => {
-      const entry: HistoryEntry = { slug, sourceUrl, photos, ts: Date.now() };
+      const entry: HistoryEntry = {
+        slug,
+        sourceUrl,
+        photos,
+        facts,
+        ts: Date.now(),
+      };
       const next = [entry, ...prev.filter((e) => e.slug !== slug)].slice(0, 8);
       try {
         localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
@@ -341,7 +422,7 @@ export default function Home() {
       }
       return next;
     });
-  }, [photos, slug, sourceUrl]);
+  }, [photos, slug, sourceUrl, facts]);
 
   // Ingest raw page source from any supported listing site: extract
   // photos, slug, and canonical URL.
@@ -358,6 +439,7 @@ export default function Home() {
       );
       setSlug(listing.slug);
       setSourceUrl(listing.sourceUrl);
+      setFacts(listing.facts);
       setTrashed([]);
       setVideoResult(null);
       setError(null);
@@ -394,6 +476,7 @@ export default function Home() {
       setPhotos(hashesToPhotos(hashes));
       setSlug(data.slug || "listing");
       setSourceUrl(data.sourceUrl);
+      setFacts({ address: addressFromSlug(data.slug || "listing") });
       setTrashed([]);
       flashAndScroll(
         `✓ ${hashes.length} photo${hashes.length === 1 ? "" : "s"} extracted — ${data.slug || "listing"}`,
@@ -503,6 +586,13 @@ export default function Home() {
           slug,
           sourceUrl,
           prompts: buildPromptsText(photos, slug),
+          textFiles: [
+            { name: "captions.txt", content: captionsFileText(facts, slug) },
+            {
+              name: "listing.txt",
+              content: listingFileText(facts, slug, sourceUrl),
+            },
+          ],
         }),
       });
       if (!res.ok) {
@@ -571,6 +661,7 @@ export default function Home() {
     setPhotos(e.photos);
     setSlug(e.slug);
     setSourceUrl(e.sourceUrl);
+    setFacts(e.facts ?? {});
     setTrashed([]);
     setVideoResult(null);
     setError(null);
@@ -652,12 +743,30 @@ export default function Home() {
         videoAR === "16:9"
           ? [DEFAULT_VIDEO_OPTIONS.width, DEFAULT_VIDEO_OPTIONS.height]
           : [1080, 1920];
+      const meta = [
+        facts.beds && `${facts.beds} bd`,
+        facts.baths && `${facts.baths} ba`,
+        facts.sqft && `${facts.sqft} sqft`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
       // Load frames through the same-origin proxy: guarantees canvas
       // pixel access (the CDN sends no CORS headers) and falls back to
       // smaller sizes when 1536 is missing.
       const result = await renderWalkthroughVideo(
         photos.map((p) => `/api/img?url=${encodeURIComponent(p.url)}`),
-        { width: w, height: h, secondsPerPhoto },
+        {
+          width: w,
+          height: h,
+          secondsPerPhoto,
+          title: { heading: facts.address, price: facts.price, meta },
+          labels: photos.map((p) =>
+            p.room === "unknown" ? "" : ROOM_LABEL[p.room],
+          ),
+          outro: branding,
+          musicUrl: music?.url,
+          musicVolume: 0.35,
+        },
         setVideoProgress,
       );
       const objectUrl = URL.createObjectURL(result.blob);
@@ -673,6 +782,48 @@ export default function Home() {
       setVideoBusy(false);
       setVideoProgress(null);
     }
+  }
+
+  async function copyText(text: string, key: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(key);
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      setError("Clipboard access denied.");
+    }
+  }
+
+  async function handleDownloadCover() {
+    if (photos.length === 0 || coverBusy) return;
+    setCoverBusy(true);
+    setError(null);
+    try {
+      const blob = await renderCoverImage(
+        `/api/img?url=${encodeURIComponent(photos[0].url)}`,
+        facts,
+        branding,
+      );
+      triggerDownload(blob, `${slug}-cover.png`);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Cover image render failed.",
+      );
+    } finally {
+      setCoverBusy(false);
+    }
+  }
+
+  function handleMusicChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (music) URL.revokeObjectURL(music.url);
+    setMusic({ url: URL.createObjectURL(file), name: file.name });
+  }
+
+  function handleRemoveMusic() {
+    if (music) URL.revokeObjectURL(music.url);
+    setMusic(null);
   }
 
   function handleCopyBookmarklet() {
@@ -959,6 +1110,14 @@ export default function Home() {
                     : "Download Photos .zip"}
                 </button>
                 <button
+                  onClick={handleDownloadCover}
+                  disabled={coverBusy}
+                  className="btn-ghost"
+                  title="1080×1350 branded hero graphic with price + address (PNG)"
+                >
+                  {coverBusy ? "Rendering…" : "Download Cover Image"}
+                </button>
+                <button
                   onClick={handleCopyPrompts}
                   className="btn-ghost"
                   title="Copy Kling/Higgsfield/Runway prompts to clipboard"
@@ -997,6 +1156,87 @@ export default function Home() {
                 </div>
               )}
 
+              <div className="glass p-5 md:p-6 mb-6">
+                <p className="microlabel mb-4">
+                  Listing Details — auto-extracted from the page source; edit
+                  anything. Used on the video title card, cover image, and
+                  captions.
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                  <div className="col-span-2 md:col-span-3">
+                    <label className="microlabel text-[9px] block mb-1">
+                      Address
+                    </label>
+                    <input
+                      value={facts.address ?? ""}
+                      onChange={(e) => updateFacts({ address: e.target.value })}
+                      placeholder="123 Main St, Anytown, CA"
+                      className={fieldCls}
+                    />
+                  </div>
+                  <div>
+                    <label className="microlabel text-[9px] block mb-1">
+                      Price
+                    </label>
+                    <input
+                      value={facts.price ?? ""}
+                      onChange={(e) => updateFacts({ price: e.target.value })}
+                      placeholder="$1,250,000"
+                      className={fieldCls}
+                    />
+                  </div>
+                  <div>
+                    <label className="microlabel text-[9px] block mb-1">
+                      Beds
+                    </label>
+                    <input
+                      value={facts.beds ?? ""}
+                      onChange={(e) => updateFacts({ beds: e.target.value })}
+                      placeholder="4"
+                      className={fieldCls}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="microlabel text-[9px] block mb-1">
+                        Baths
+                      </label>
+                      <input
+                        value={facts.baths ?? ""}
+                        onChange={(e) => updateFacts({ baths: e.target.value })}
+                        placeholder="3"
+                        className={fieldCls}
+                      />
+                    </div>
+                    <div>
+                      <label className="microlabel text-[9px] block mb-1">
+                        SqFt
+                      </label>
+                      <input
+                        value={facts.sqft ?? ""}
+                        onChange={(e) => updateFacts({ sqft: e.target.value })}
+                        placeholder="2,450"
+                        className={fieldCls}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <label className="microlabel text-[9px] block mb-1">
+                    Description
+                  </label>
+                  <textarea
+                    value={facts.description ?? ""}
+                    onChange={(e) =>
+                      updateFacts({ description: e.target.value })
+                    }
+                    rows={2}
+                    placeholder="Sun-drenched corner lot with a chef's kitchen…"
+                    className={fieldCls}
+                  />
+                </div>
+              </div>
+
               <DndContext
                 sensors={sensors}
                 collisionDetection={closestCenter}
@@ -1021,6 +1261,34 @@ export default function Home() {
               </DndContext>
 
               <div className="mt-16">
+                <p className="eyebrow mb-3">Social Captions</p>
+                <h3 className="font-display text-text text-2xl md:text-3xl leading-tight font-medium mb-2">
+                  Ready-to-post captions
+                </h3>
+                <p className="text-text-dim text-sm leading-relaxed mb-6 max-w-xl">
+                  Generated from the listing details above — three voices for
+                  Instagram, Reels/TikTok, and luxury campaigns. Also included
+                  in the zip as captions.txt.
+                </p>
+                <div className="grid md:grid-cols-3 gap-3">
+                  {buildCaptions(facts).map((c) => (
+                    <div key={c.key} className="glass p-5 flex flex-col">
+                      <p className="microlabel mb-3">{c.label}</p>
+                      <pre className="whitespace-pre-wrap text-text-dim text-xs font-sans leading-relaxed flex-1">
+                        {c.text}
+                      </pre>
+                      <button
+                        onClick={() => copyText(c.text, c.key)}
+                        className="btn-ghost mt-4 self-start"
+                      >
+                        {copied === c.key ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-16">
                 <p className="eyebrow mb-3">Walkthrough Video</p>
                 <h3 className="font-display text-text text-2xl md:text-3xl leading-tight font-medium mb-2">
                   Render a Ken-Burns walkthrough
@@ -1032,6 +1300,68 @@ export default function Home() {
                 </p>
 
                 <div className="glass p-5 md:p-6">
+                  <div className="mb-6 grid md:grid-cols-2 gap-5 pb-6 border-b border-white/10">
+                    <div>
+                      <p className="microlabel mb-2">
+                        Agent Branding — video outro &amp; cover image (saved)
+                      </p>
+                      <div className="flex flex-col gap-2">
+                        <input
+                          value={branding.name ?? ""}
+                          onChange={(e) =>
+                            updateBranding({ name: e.target.value })
+                          }
+                          placeholder="Name / Team"
+                          className={fieldCls}
+                        />
+                        <input
+                          value={branding.phone ?? ""}
+                          onChange={(e) =>
+                            updateBranding({ phone: e.target.value })
+                          }
+                          placeholder="Phone"
+                          className={fieldCls}
+                        />
+                        <input
+                          value={branding.website ?? ""}
+                          onChange={(e) =>
+                            updateBranding({ website: e.target.value })
+                          }
+                          placeholder="Website"
+                          className={fieldCls}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <p className="microlabel mb-2">
+                        Background Music (optional)
+                      </p>
+                      <input
+                        type="file"
+                        accept="audio/*"
+                        onChange={handleMusicChange}
+                        className="block w-full text-xs text-text-dim file:mr-3 file:px-3 file:py-2 file:rounded-sonder file:border-0 file:bg-white/10 file:text-text file:text-xs file:cursor-pointer"
+                      />
+                      {music && (
+                        <p className="mt-2 text-xs text-text-dim">
+                          ♪ {music.name}{" "}
+                          <button
+                            type="button"
+                            onClick={handleRemoveMusic}
+                            className="text-accent-bright hover:underline ml-1"
+                          >
+                            remove
+                          </button>
+                        </p>
+                      )}
+                      <p className="mt-2 microlabel text-[9px] opacity-70">
+                        Looped under the video at 35% volume. Use a track you
+                        have rights to. The video opens with a title card
+                        (address · price · specs) and closes with your
+                        branding; room labels appear on classified photos.
+                      </p>
+                    </div>
+                  </div>
                   <div className="flex flex-col md:flex-row md:items-end gap-5 md:gap-8">
                     <div>
                       <p className="microlabel mb-2">Aspect</p>

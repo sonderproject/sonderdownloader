@@ -3,6 +3,18 @@
 // captures the canvas via MediaRecorder, and returns the resulting Blob.
 // Runs entirely in the browser — no server, no ffmpeg.wasm.
 
+export type VideoTitle = {
+  heading?: string; // address
+  price?: string;
+  meta?: string; // "4 bd · 3 ba · 2,450 sqft"
+};
+
+export type VideoOutro = {
+  name?: string;
+  phone?: string;
+  website?: string;
+};
+
 export type VideoOptions = {
   width: number;
   height: number;
@@ -10,6 +22,12 @@ export type VideoOptions = {
   fps: number;
   crossfadeSeconds: number;
   bitsPerSecond?: number;
+  // Optional production extras — all rendered on the same canvas.
+  title?: VideoTitle; // 3s opening card over the first photo
+  labels?: string[]; // per-photo lower-third room label ("" = none)
+  outro?: VideoOutro; // 3s closing card with agent branding
+  musicUrl?: string; // object URL of an uploaded audio file
+  musicVolume?: number; // 0..1, default 0.35
 };
 
 export const DEFAULT_VIDEO_OPTIONS: VideoOptions = {
@@ -34,15 +52,23 @@ function loadImage(url: string): Promise<HTMLImageElement> {
 }
 
 // Pick MediaRecorder mimeType supported by the browser. Prefer MP4 when
-// available (Safari), then WebM. Actual browsers vary — probe.
-function pickMimeType(): { mime: string; ext: string } {
-  const candidates = [
+// available (Safari), then WebM. When a music track is present, probe
+// audio-capable codec strings first so the audio track isn't dropped.
+function pickMimeType(withAudio: boolean): { mime: string; ext: string } {
+  const audioCandidates = [
+    { mime: "video/mp4;codecs=avc1.42E01E,mp4a.40.2", ext: "mp4" },
+    { mime: "video/webm;codecs=vp9,opus", ext: "webm" },
+    { mime: "video/webm;codecs=vp8,opus", ext: "webm" },
+    { mime: "video/webm", ext: "webm" },
+  ];
+  const videoOnly = [
     { mime: "video/mp4;codecs=avc1.42E01E", ext: "mp4" },
     { mime: "video/mp4", ext: "mp4" },
     { mime: "video/webm;codecs=vp9", ext: "webm" },
     { mime: "video/webm;codecs=vp8", ext: "webm" },
     { mime: "video/webm", ext: "webm" },
   ];
+  const candidates = withAudio ? [...audioCandidates, ...videoOnly] : videoOnly;
   for (const c of candidates) {
     if (
       typeof MediaRecorder !== "undefined" &&
@@ -166,8 +192,47 @@ export async function renderWalkthroughVideo(
   const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) throw new Error("Canvas 2D context unavailable.");
 
-  const { mime, ext } = pickMimeType();
+  const hasTitle = !!(
+    o.title &&
+    (o.title.heading || o.title.price || o.title.meta)
+  );
+  const hasOutro = !!(
+    o.outro &&
+    (o.outro.name || o.outro.phone || o.outro.website)
+  );
+  const wantsMusic = !!o.musicUrl;
+
+  const { mime, ext } = pickMimeType(wantsMusic);
   const stream = canvas.captureStream(fps);
+
+  // Mix an uploaded music track into the recording: element → gain →
+  // MediaStreamDestination, whose audio track joins the canvas stream.
+  // Failure here degrades to a silent video, never a failed render.
+  let audioCleanup: (() => void) | null = null;
+  if (wantsMusic) {
+    try {
+      const audio = new Audio(o.musicUrl!);
+      audio.loop = true;
+      const actx = new AudioContext();
+      const src = actx.createMediaElementSource(audio);
+      const gain = actx.createGain();
+      gain.gain.value = o.musicVolume ?? 0.35;
+      const dest = actx.createMediaStreamDestination();
+      src.connect(gain);
+      gain.connect(dest);
+      for (const track of dest.stream.getAudioTracks()) {
+        stream.addTrack(track);
+      }
+      await audio.play();
+      audioCleanup = () => {
+        audio.pause();
+        void actx.close();
+      };
+    } catch (err) {
+      console.warn("music track failed, rendering silent video:", err);
+    }
+  }
+
   const recorder = new MediaRecorder(stream, {
     mimeType: mime,
     videoBitsPerSecond: o.bitsPerSecond,
@@ -182,11 +247,17 @@ export async function renderWalkthroughVideo(
     recorder.onerror = (e) => reject(e as unknown as Error);
   });
 
-  recorder.start(250);
-
   const framesPerPhoto = Math.max(2, Math.round(secondsPerPhoto * fps));
   const crossfadeFrames = Math.max(0, Math.round(crossfadeSeconds * fps));
+  const titleFrames = hasTitle ? Math.round(3 * fps) : 0;
+  const outroFrames = hasOutro ? Math.round(3 * fps) : 0;
   const totalPhotos = imgs.length;
+  const totalFrames =
+    titleFrames + totalPhotos * framesPerPhoto + outroFrames;
+  let framesDone = 0;
+
+  const base = Math.min(width, height);
+  const fontStack = "Outfit, Inter, system-ui, sans-serif";
 
   const drawFrame = (img: HTMLImageElement, seed: number, t: number) => {
     ctx.fillStyle = "#000";
@@ -195,66 +266,192 @@ export async function renderWalkthroughVideo(
     ctx.drawImage(img, r.sx, r.sy, r.sw, r.sh, 0, 0, width, height);
   };
 
+  // Opening card: the first photo slowly zooming behind a scrim, with
+  // address / price / specs fading in.
+  const drawTitleCard = (t: number) => {
+    drawFrame(imgs[0], 0, t * 0.3);
+    ctx.fillStyle = "rgba(10,10,9,0.62)";
+    ctx.fillRect(0, 0, width, height);
+    ctx.globalAlpha = Math.min(1, t * 3);
+    ctx.textAlign = "center";
+    let y = height * 0.42;
+    ctx.fillStyle = "#6FC3F0";
+    ctx.font = `600 ${Math.round(base * 0.022)}px ${fontStack}`;
+    ctx.fillText("JUST LISTED", width / 2, y);
+    y += base * 0.08;
+    if (o.title?.heading) {
+      let size = Math.round(base * 0.05);
+      ctx.font = `500 ${size}px ${fontStack}`;
+      while (
+        ctx.measureText(o.title.heading).width > width * 0.86 &&
+        size > 18
+      ) {
+        size -= 2;
+        ctx.font = `500 ${size}px ${fontStack}`;
+      }
+      ctx.fillStyle = "#EDE9E3";
+      ctx.fillText(o.title.heading, width / 2, y);
+      y += base * 0.095;
+    }
+    if (o.title?.price) {
+      ctx.font = `600 ${Math.round(base * 0.062)}px ${fontStack}`;
+      ctx.fillStyle = "#EDE9E3";
+      ctx.fillText(o.title.price, width / 2, y);
+      y += base * 0.07;
+    }
+    if (o.title?.meta) {
+      ctx.font = `500 ${Math.round(base * 0.026)}px ${fontStack}`;
+      ctx.fillStyle = "rgba(237,233,227,0.85)";
+      ctx.fillText(o.title.meta, width / 2, y);
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "left";
+  };
+
+  // Lower-third room label with an accent bar, faded by `alpha`.
+  const drawLabel = (text: string, alpha: number) => {
+    if (!text || alpha <= 0) return;
+    const fs = Math.round(base * 0.028);
+    ctx.font = `600 ${fs}px ${fontStack}`;
+    const tw = ctx.measureText(text).width;
+    const padX = fs * 0.9;
+    const padY = fs * 0.55;
+    const rectH = fs + padY * 2;
+    const x = width * 0.045;
+    const yBottom = height * 0.94;
+    ctx.globalAlpha = alpha * 0.85;
+    ctx.fillStyle = "rgba(10,10,9,0.72)";
+    ctx.fillRect(x, yBottom - rectH, tw + padX * 2 + 5, rectH);
+    ctx.fillStyle = "#3E9BD4";
+    ctx.fillRect(x, yBottom - rectH, 5, rectH);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "#EDE9E3";
+    ctx.fillText(text, x + padX + 5, yBottom - padY - fs * 0.14);
+    ctx.globalAlpha = 1;
+  };
+
+  // Closing card: agent branding on the dark canvas.
+  const drawOutroCard = (t: number) => {
+    ctx.fillStyle = "#0A0A09";
+    ctx.fillRect(0, 0, width, height);
+    ctx.globalAlpha = Math.min(1, t * 3);
+    ctx.textAlign = "center";
+    let y = height * 0.42;
+    ctx.fillStyle = "rgba(237,233,227,0.6)";
+    ctx.font = `600 ${Math.round(base * 0.02)}px ${fontStack}`;
+    ctx.fillText("PRESENTED BY", width / 2, y);
+    y += base * 0.065;
+    if (o.outro?.name) {
+      ctx.font = `500 ${Math.round(base * 0.045)}px ${fontStack}`;
+      ctx.fillStyle = "#EDE9E3";
+      ctx.fillText(o.outro.name, width / 2, y);
+      y += base * 0.05;
+    }
+    ctx.fillStyle = "#3E9BD4";
+    ctx.fillRect(width / 2 - 44, y, 88, 5);
+    y += base * 0.055;
+    if (o.outro?.phone) {
+      ctx.font = `500 ${Math.round(base * 0.028)}px ${fontStack}`;
+      ctx.fillStyle = "rgba(237,233,227,0.9)";
+      ctx.fillText(o.outro.phone, width / 2, y);
+      y += base * 0.042;
+    }
+    if (o.outro?.website) {
+      ctx.font = `500 ${Math.round(base * 0.024)}px ${fontStack}`;
+      ctx.fillStyle = "#6FC3F0";
+      ctx.fillText(o.outro.website, width / 2, y);
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "left";
+  };
+
   // Wait a frame between draws to give the MediaRecorder time to sample.
   const nextFrame = () =>
     new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
-  for (let p = 0; p < totalPhotos; p++) {
-    const img = imgs[p];
-    const seed = p;
-    for (let f = 0; f < framesPerPhoto; f++) {
-      const t = ease(f / (framesPerPhoto - 1));
-      drawFrame(img, seed, t);
+  const tickProgress = (photoIndex: number) => {
+    framesDone++;
+    onProgress?.({
+      phase: "rendering",
+      photoIndex,
+      totalPhotos,
+      frameRatio: framesDone / totalFrames,
+    });
+  };
 
-      // Crossfade tail: blend next photo on top for the last crossfade frames.
-      if (
-        p < totalPhotos - 1 &&
-        crossfadeFrames > 0 &&
-        f >= framesPerPhoto - crossfadeFrames
-      ) {
-        const nextImg = imgs[p + 1];
-        const nextSeed = p + 1;
-        const cfProgress = (f - (framesPerPhoto - crossfadeFrames)) / crossfadeFrames;
-        // Draw next photo at very start of its motion.
-        const r2 = kbRect(
-          nextImg.naturalWidth,
-          nextImg.naturalHeight,
-          width,
-          height,
-          nextSeed,
-          0,
-        );
-        ctx.globalAlpha = ease(cfProgress);
-        ctx.drawImage(nextImg, r2.sx, r2.sy, r2.sw, r2.sh, 0, 0, width, height);
-        ctx.globalAlpha = 1;
-      }
+  recorder.start(250);
 
-      onProgress?.({
-        phase: "rendering",
-        photoIndex: p,
-        totalPhotos,
-        frameRatio: (p * framesPerPhoto + f + 1) / (totalPhotos * framesPerPhoto),
-      });
+  try {
+    for (let f = 0; f < titleFrames; f++) {
+      drawTitleCard(f / Math.max(1, titleFrames - 1));
+      tickProgress(0);
       await nextFrame();
     }
+
+    for (let p = 0; p < totalPhotos; p++) {
+      const img = imgs[p];
+      const seed = p;
+      const label = o.labels?.[p] ?? "";
+      for (let f = 0; f < framesPerPhoto; f++) {
+        const t = ease(f / (framesPerPhoto - 1));
+        drawFrame(img, seed, t);
+
+        // Crossfade tail: blend next photo on top for the last frames.
+        let cfProgress = 0;
+        if (
+          p < totalPhotos - 1 &&
+          crossfadeFrames > 0 &&
+          f >= framesPerPhoto - crossfadeFrames
+        ) {
+          const nextImg = imgs[p + 1];
+          const nextSeed = p + 1;
+          cfProgress =
+            (f - (framesPerPhoto - crossfadeFrames)) / crossfadeFrames;
+          // Draw next photo at very start of its motion.
+          const r2 = kbRect(
+            nextImg.naturalWidth,
+            nextImg.naturalHeight,
+            width,
+            height,
+            nextSeed,
+            0,
+          );
+          ctx.globalAlpha = ease(cfProgress);
+          ctx.drawImage(nextImg, r2.sx, r2.sy, r2.sw, r2.sh, 0, 0, width, height);
+          ctx.globalAlpha = 1;
+        }
+
+        // Room label fades in over ~0.4s and out with the crossfade.
+        drawLabel(label, Math.min(1, f / (fps * 0.4)) * (1 - cfProgress));
+
+        tickProgress(p);
+        await nextFrame();
+      }
+    }
+
+    for (let f = 0; f < outroFrames; f++) {
+      drawOutroCard(f / Math.max(1, outroFrames - 1));
+      tickProgress(totalPhotos - 1);
+      await nextFrame();
+    }
+
+    onProgress?.({
+      phase: "encoding",
+      photoIndex: totalPhotos,
+      totalPhotos,
+      frameRatio: 1,
+    });
+
+    // Give recorder one more tick before stopping.
+    await nextFrame();
+    recorder.stop();
+    const blob = await done;
+
+    const durationSeconds =
+      (totalFrames - Math.max(0, totalPhotos - 1) * crossfadeFrames) / fps;
+
+    return { blob, mime, ext, durationSeconds };
+  } finally {
+    audioCleanup?.();
   }
-
-  onProgress?.({
-    phase: "encoding",
-    photoIndex: totalPhotos,
-    totalPhotos,
-    frameRatio: 1,
-  });
-
-  // Give recorder one more tick before stopping.
-  await nextFrame();
-  recorder.stop();
-  const blob = await done;
-
-  const durationSeconds =
-    (totalPhotos * framesPerPhoto -
-      Math.max(0, totalPhotos - 1) * crossfadeFrames) /
-    fps;
-
-  return { blob, mime, ext, durationSeconds };
 }

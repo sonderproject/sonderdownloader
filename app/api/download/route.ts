@@ -18,11 +18,16 @@ type Body = {
   slug?: unknown;
   sourceUrl?: unknown;
   prompts?: unknown;
+  textFiles?: unknown;
 };
 
 type Entry = { url: string; name: string };
+type TextFile = { name: string; content: string };
 
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+const TEXT_NAME_RE = /^[A-Za-z0-9_-]{1,40}\.(?:txt|json)$/i;
+const MAX_TEXT_FILES = 5;
+const MAX_TEXT_LEN = 200_000;
 
 function pad(n: number, width: number): string {
   return String(n).padStart(width, "0");
@@ -73,12 +78,33 @@ export async function POST(req: NextRequest) {
   const sourceUrl =
     typeof body.sourceUrl === "string" ? body.sourceUrl : undefined;
 
-  const prompts =
+  const textFiles: TextFile[] = [];
+  if (
     typeof body.prompts === "string" &&
     body.prompts.length > 0 &&
-    body.prompts.length <= 200_000
-      ? body.prompts
-      : null;
+    body.prompts.length <= MAX_TEXT_LEN
+  ) {
+    textFiles.push({ name: "prompts.txt", content: body.prompts });
+  }
+  if (Array.isArray(body.textFiles)) {
+    for (const f of body.textFiles.slice(0, MAX_TEXT_FILES)) {
+      if (
+        f &&
+        typeof f === "object" &&
+        typeof (f as TextFile).name === "string" &&
+        TEXT_NAME_RE.test((f as TextFile).name) &&
+        typeof (f as TextFile).content === "string" &&
+        (f as TextFile).content.length > 0 &&
+        (f as TextFile).content.length <= MAX_TEXT_LEN &&
+        !textFiles.some((t) => t.name === (f as TextFile).name)
+      ) {
+        textFiles.push({
+          name: (f as TextFile).name,
+          content: (f as TextFile).content,
+        });
+      }
+    }
+  }
 
   const archive = archiver("zip", { zlib: { level: 6 } });
   const passthrough = new PassThrough();
@@ -94,8 +120,8 @@ export async function POST(req: NextRequest) {
 
   (async () => {
     try {
-      if (prompts) {
-        archive.append(Buffer.from(prompts, "utf8"), { name: "prompts.txt" });
+      for (const f of textFiles) {
+        archive.append(Buffer.from(f.content, "utf8"), { name: f.name });
       }
       for (let i = 0; i < entries.length; i++) {
         const { url, name } = entries[i];

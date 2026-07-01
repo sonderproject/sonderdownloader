@@ -87,110 +87,152 @@ export default function Home() {
 
   return (
     <main className="min-h-screen w-full flex flex-col">
-      <header className="w-full pt-8 pb-4 px-6 md:px-12">
-        <div className="flex items-center gap-3">
-          <div className="w-2 h-8 rounded-full bg-teal-deep" />
-          <span className="font-serif text-navy text-lg tracking-tight">
-            Sonder
-          </span>
+      <header className="w-full pt-8 pb-6 px-6 md:px-16">
+        <div className="flex items-center justify-between max-w-6xl mx-auto">
+          <div className="flex items-baseline gap-3">
+            <span className="font-serif text-ink text-xl tracking-tight">
+              Sonder
+            </span>
+            <span className="text-ink-muted text-xs uppercase tracking-widest">
+              Studio
+            </span>
+          </div>
+          <div className="text-ink-muted text-xs uppercase tracking-widest">
+            Real Estate · Downloader
+          </div>
         </div>
       </header>
 
-      <section className="flex-1 flex items-start md:items-center justify-center px-6 md:px-12 pb-12">
-        <div className="w-full max-w-3xl">
-          <div className="text-center mb-10">
-            <p className="font-sans uppercase tracking-[0.28em] text-xs text-teal-deep mb-4">
-              Real Estate Downloader
-            </p>
-            <h1 className="font-serif text-navy text-4xl md:text-6xl leading-[1.05] mb-4">
-              Every listing photo,
-              <br />
-              at full resolution.
-            </h1>
-            <p className="font-sans text-navy-soft/70 max-w-xl mx-auto text-base md:text-lg">
-              Paste a Zillow listing. We pull every photo at its highest
-              resolution and hand you a single zip — ready for Kling, Higgsfield,
-              or wherever else the frame goes next.
-            </p>
+      <div className="hairline max-w-6xl w-full mx-auto" />
+
+      <section className="flex-1 px-6 md:px-16 py-12 md:py-20">
+        <div className="max-w-6xl mx-auto">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-8 md:gap-12 items-start">
+            <div className="md:col-span-7">
+              <p className="font-sans uppercase tracking-widest text-[11px] text-ember mb-6">
+                Index № 001 · Utility
+              </p>
+              <h1 className="font-serif text-ink text-5xl md:text-7xl leading-[0.98] mb-6">
+                Every listing photo,
+                <br />
+                <em className="font-serif italic text-ember">at full resolution.</em>
+              </h1>
+              <p className="font-sans text-ink-soft/80 text-base md:text-lg max-w-xl leading-relaxed">
+                Paste a Zillow listing. We slip past the page-block, pull every
+                photo at its highest resolution, and hand you a single zip —
+                ready for Kling, Higgsfield, or wherever the next frame lives.
+              </p>
+            </div>
+            <aside className="md:col-span-5 md:pl-8 md:border-l md:border-ink/10">
+              <p className="font-sans uppercase tracking-widest text-[11px] text-ink-muted mb-3">
+                On this page
+              </p>
+              <ul className="font-serif text-ink text-lg space-y-2">
+                <li>— Paste a URL.</li>
+                <li>— Preview every photo.</li>
+                <li>— Download the archive.</li>
+              </ul>
+              <p className="mt-6 font-sans text-ink-muted text-xs leading-relaxed">
+                No accounts. No storage. Photos are streamed through this
+                session and never kept.
+              </p>
+            </aside>
           </div>
 
-          <form onSubmit={handleSubmit} className="mb-6">
-            <div className="flex flex-col md:flex-row gap-3">
-              <input
-                type="url"
-                required
-                inputMode="url"
-                autoComplete="off"
-                spellCheck={false}
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://www.zillow.com/homedetails/..."
-                className="flex-1 px-5 py-4 rounded-xl bg-cream-soft border border-navy/10 focus:border-teal focus:outline-none focus:ring-2 focus:ring-teal/20 text-navy placeholder:text-navy/30 font-sans transition"
-                disabled={loading}
-              />
-              <button
-                type="submit"
-                disabled={loading || !url.trim()}
-                className="px-6 py-4 rounded-xl bg-navy hover:bg-navy-deep text-cream-soft font-sans font-medium tracking-wide disabled:opacity-50 disabled:cursor-not-allowed transition shadow-depth"
+          <div className="mt-14 md:mt-20">
+            <form onSubmit={handleSubmit}>
+              <label
+                htmlFor="url"
+                className="block font-sans uppercase tracking-widest text-[11px] text-ink-muted mb-3"
               >
-                {loading ? "Reading listing…" : "Get Photos"}
-              </button>
-            </div>
-          </form>
-
-          {error && (
-            <div className="mb-6 px-5 py-4 rounded-xl bg-cream-deep/60 border border-navy/10 text-navy-soft text-sm">
-              {error}
-            </div>
-          )}
-
-          {result && result.photos.length > 0 && (
-            <div>
-              <div className="divider-depth my-6" />
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                  <p className="font-serif text-navy text-2xl">
-                    {result.photos.length} photo
-                    {result.photos.length === 1 ? "" : "s"}
-                  </p>
-                  <p className="text-navy-soft/60 text-sm mt-1">
-                    Max resolution · {result.slug}
-                  </p>
-                </div>
+                Zillow Listing URL
+              </label>
+              <div className="flex flex-col md:flex-row gap-3 md:gap-4 items-stretch">
+                <input
+                  id="url"
+                  type="url"
+                  required
+                  inputMode="url"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="https://www.zillow.com/homedetails/…"
+                  className="flex-1 px-0 py-4 bg-transparent border-0 border-b border-ink/25 focus:border-ink focus:outline-none focus:ring-0 text-ink placeholder:text-ink-muted/60 font-serif text-lg md:text-2xl transition"
+                  disabled={loading}
+                />
                 <button
-                  onClick={handleDownload}
-                  disabled={zipping}
-                  className="px-5 py-3 rounded-xl bg-teal-deep hover:bg-teal text-cream-soft font-sans font-medium disabled:opacity-60 disabled:cursor-not-allowed transition shadow-depth"
+                  type="submit"
+                  disabled={loading || !url.trim()}
+                  className="self-start md:self-auto px-6 py-4 rounded-none bg-ink hover:bg-ember text-paper-soft font-sans text-sm uppercase tracking-widest disabled:opacity-40 disabled:cursor-not-allowed transition"
                 >
-                  {zipping ? "Zipping…" : "Download All (.zip)"}
+                  {loading ? "Reading…" : "Get Photos"}
                 </button>
               </div>
+            </form>
 
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                {result.photos.map((photo, i) => (
-                  <div
-                    key={photo}
-                    className="relative aspect-[4/3] rounded-lg overflow-hidden bg-cream-deep/40 border border-navy/5"
-                  >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={photo}
-                      alt={`Listing photo ${i + 1}`}
-                      loading="lazy"
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                ))}
+            {error && (
+              <div className="mt-8 border-l-2 border-ember pl-4 py-1 text-ink-soft text-sm font-sans max-w-xl">
+                {error}
               </div>
-            </div>
-          )}
+            )}
+
+            {result && result.photos.length > 0 && (
+              <div className="mt-16">
+                <div className="hairline mb-8" />
+                <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-10">
+                  <div>
+                    <p className="font-sans uppercase tracking-widest text-[11px] text-ink-muted mb-2">
+                      Result
+                    </p>
+                    <h2 className="font-serif text-ink text-3xl md:text-4xl leading-tight">
+                      {result.photos.length} photo
+                      {result.photos.length === 1 ? "" : "s"} · max resolution
+                    </h2>
+                    <p className="mt-2 font-sans text-ink-muted text-sm">
+                      {result.slug}
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleDownload}
+                    disabled={zipping}
+                    className="self-start md:self-auto px-6 py-4 rounded-none bg-ember hover:bg-ember-deep text-paper-soft font-sans text-sm uppercase tracking-widest disabled:opacity-50 disabled:cursor-not-allowed transition"
+                  >
+                    {zipping ? "Zipping…" : "Download Archive (.zip)"}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 md:gap-3">
+                  {result.photos.map((photo, i) => (
+                    <figure
+                      key={photo}
+                      className="relative aspect-[4/3] overflow-hidden bg-paper-deep"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={photo}
+                        alt={`Listing photo ${i + 1}`}
+                        loading="lazy"
+                        className="w-full h-full object-cover"
+                      />
+                      <figcaption className="absolute bottom-2 left-2 text-[10px] uppercase tracking-widest text-paper-soft/90 font-sans mix-blend-difference">
+                        {String(i + 1).padStart(2, "0")}
+                      </figcaption>
+                    </figure>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
-      <footer className="w-full py-6 px-6 md:px-12 text-navy-soft/50 text-xs font-sans">
-        <div className="max-w-3xl mx-auto flex justify-between">
-          <span>Sonder · a stateless utility</span>
-          <span>No accounts. No storage.</span>
+      <div className="hairline max-w-6xl w-full mx-auto" />
+
+      <footer className="w-full py-8 px-6 md:px-16 text-ink-muted text-xs font-sans uppercase tracking-widest">
+        <div className="max-w-6xl mx-auto flex flex-col md:flex-row md:justify-between gap-2">
+          <span>Sonder Studio · MMXXVI</span>
+          <span>A stateless utility</span>
         </div>
       </footer>
     </main>

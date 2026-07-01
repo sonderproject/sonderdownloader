@@ -16,9 +16,9 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Sonder — Real Estate Downloader",
+  title: "Sonder Studio — Real Estate Downloader",
   description:
-    "Extract every Zillow listing photo at max resolution. Built for feeding AI video generators.",
+    "Every listing photo, at full resolution. A stateless utility for feeding AI video generators.",
 };
 
 export default function RootLayout({

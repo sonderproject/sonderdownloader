@@ -13,15 +13,25 @@ listing photo at max resolution. Built for feeding AI video generators
 ## How it works
 
 1. You paste a Zillow listing URL.
-2. `POST /api/extract` renders the page in a real headless Chromium,
-   waits for lazy-loaded photo elements, and pulls every URL matching
-   `photos.zillowstatic.com/fp/<hash>-cc_ft_<n>.jpg`.
-3. Each hash is rebuilt at max resolution (`cc_ft_1536`) and returned to
+2. `POST /api/extract` renders the page in a real headless Chromium
+   with stealth patches applied (webdriver flag hidden, plugin/language
+   surface faked, `chrome` runtime spoofed, `AutomationControlled`
+   Blink feature disabled). PerimeterX's first-tier automation checks
+   read as a real browser.
+3. Photos are collected from three sources and deduped by hash:
+   - Every `photos.zillowstatic.com/fp/<hash>-cc_ft_<n>.(jpg|webp)` URL
+     that appears in the rendered DOM.
+   - The stringified JSON blobs embedded in `<script>` tags
+     (`__NEXT_DATA__`, `hdpApolloPreloadedData`, etc.) — these hold the
+     canonical photo list even when the gallery hasn't hydrated.
+   - Every image response observed on the wire via a Playwright
+     `page.on("response")` listener.
+4. Each hash is rebuilt at max resolution (`cc_ft_1536`) and returned to
    the browser. The frontend shows a lazy-loaded thumbnail grid.
-4. On **Download All (.zip)**, `POST /api/download` streams the photos
-   server-side into a zip named `<address-slug>.zip`. A `Referer` header
-   pointing at the original listing is sent with each image request so
-   CDNs don't refuse.
+5. On **Download Archive (.zip)**, `POST /api/download` streams the
+   photos server-side into a zip named `<address-slug>.zip`. A `Referer`
+   header pointing at the original listing is sent with each image
+   request so CDNs don't refuse.
 
 ## Local setup
 

@@ -8,28 +8,32 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        navy: {
-          DEFAULT: "#0B2545",
-          deep: "#061530",
-          soft: "#13315C",
+        ink: {
+          DEFAULT: "#141210",
+          soft: "#3B3733",
+          muted: "#7A736C",
         },
-        teal: {
-          DEFAULT: "#3AAFA9",
-          deep: "#2B7A78",
-          soft: "#8FD9D4",
+        paper: {
+          DEFAULT: "#F3EDE3",
+          soft: "#F8F4EC",
+          deep: "#E7DFD1",
         },
-        cream: {
-          DEFAULT: "#F5F1E8",
-          soft: "#FBF8F1",
-          deep: "#EBE4D2",
+        ember: {
+          DEFAULT: "#B7532A",
+          soft: "#D97742",
+          deep: "#8B3E1F",
+        },
+        moss: {
+          DEFAULT: "#4A5D3A",
         },
       },
       fontFamily: {
         serif: ["var(--font-fraunces)", "Fraunces", "Georgia", "serif"],
         sans: ["var(--font-inter)", "Inter", "system-ui", "sans-serif"],
       },
-      boxShadow: {
-        depth: "0 20px 40px -20px rgba(6, 21, 48, 0.25)",
+      letterSpacing: {
+        "wider-plus": "0.18em",
+        widest: "0.28em",
       },
     },
   },

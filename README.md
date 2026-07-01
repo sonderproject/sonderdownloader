@@ -12,26 +12,37 @@ listing photo at max resolution. Built for feeding AI video generators
 
 ## How it works
 
-1. You paste a Zillow listing URL.
-2. `POST /api/extract` renders the page in a real headless Chromium
-   with stealth patches applied (webdriver flag hidden, plugin/language
-   surface faked, `chrome` runtime spoofed, `AutomationControlled`
-   Blink feature disabled). PerimeterX's first-tier automation checks
-   read as a real browser.
-3. Photos are collected from three sources and deduped by hash:
-   - Every `photos.zillowstatic.com/fp/<hash>-cc_ft_<n>.(jpg|webp)` URL
-     that appears in the rendered DOM.
-   - The stringified JSON blobs embedded in `<script>` tags
-     (`__NEXT_DATA__`, `hdpApolloPreloadedData`, etc.) — these hold the
-     canonical photo list even when the gallery hasn't hydrated.
-   - Every image response observed on the wire via a Playwright
-     `page.on("response")` listener.
-4. Each hash is rebuilt at max resolution (`cc_ft_1536`) and returned to
-   the browser. The frontend shows a lazy-loaded thumbnail grid.
-5. On **Download Archive (.zip)**, `POST /api/download` streams the
-   photos server-side into a zip named `<address-slug>.zip`. A `Referer`
-   header pointing at the original listing is sent with each image
-   request so CDNs don't refuse.
+`POST /api/extract` runs a **three-strategy pipeline**, first hit wins:
+
+1. **Wayback Machine.** Query `archive.org/wayback/available` for the
+   closest snapshot, then fetch the raw archived HTML via the `id_`
+   identifier and regex out every `photos.zillowstatic.com/fp/<hash>`
+   URL. Zero bot detection, no browser cold-start, works from anywhere.
+   Photo hashes don't rotate, so archived hashes still resolve today.
+2. **ZenRows** (only if `ZENROWS_API_KEY` env var is set on Vercel).
+   Routes the request through residential/premium IPs with native
+   PerimeterX bypass. Free tier is 1000 requests. This is the reliable
+   path when Vercel's datacenter IP gets blocked.
+3. **Playwright direct.** Boots `@sparticuz/chromium-min` on serverless
+   with stealth patches and manual headers. Often blocked on Vercel's
+   AWS IP by PerimeterX — kept as a last-resort fallback.
+
+Whichever strategy returns hashes wins. Hashes are rebuilt at max
+resolution (`cc_ft_1536`) and returned to the browser, which shows a
+lazy-loaded thumbnail grid.
+
+On **Download Archive (.zip)**, `POST /api/download` streams the photos
+server-side into a zip named `<address-slug>.zip`. A `Referer` header
+pointing at the original listing is sent with each image request so CDNs
+don't refuse.
+
+### The Vercel datacenter-IP problem
+
+PerimeterX (now HUMAN) flags AWS/Vercel IP ranges aggressively, so even
+perfect browser stealth often gets blocked. That's why Wayback is the
+first strategy: it doesn't hit Zillow from your IP. For listings without
+snapshots, add `ZENROWS_API_KEY` on Vercel to unlock the residential-IP
+path — signup is free at https://app.zenrows.com/register.
 
 ## Local setup
 

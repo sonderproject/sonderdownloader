@@ -1,18 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import chromiumPack from "@sparticuz/chromium-min";
-// playwright-extra can't auto-discover playwright-core inside a Next.js
-// serverless bundle, so hand it the browser type explicitly via addExtra.
-import { chromium as playwrightChromium } from "playwright-core";
-import { addExtra } from "playwright-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import type { Browser, BrowserContext, Page } from "playwright-core";
-
-const extraChromium = addExtra(playwrightChromium);
-extraChromium.use(StealthPlugin());
+import {
+  chromium as playwrightChromium,
+  type Browser,
+  type BrowserContext,
+  type Page,
+} from "playwright-core";
 
 export const runtime = "nodejs";
-// Vercel Hobby caps at 10s; extraction (browser boot + PerimeterX-safe
-// render/wait) routinely takes 20–40s, so Vercel Pro is required.
+// Vercel Hobby caps at 10s; extraction (browser boot + render + waits)
+// routinely takes 20–40s. Vercel Pro is required in production.
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
@@ -21,21 +18,21 @@ const DEFAULT_CHROMIUM_PACK =
 
 const ZILLOW_HOST_RE = /(^|\.)zillow\.com$/i;
 
-// Dedup key = photo hash. Size suffix is captured only so we can pick
-// the largest observed for logging; we always rebuild at cc_ft_1536.
+// The photo hash is the only durable ID; the size suffix is
+// interchangeable. Zillow never rotates hashes, so archived pages'
+// hashes still resolve today.
 const PHOTO_URL_RE =
-  /photos\.zillowstatic\.com\\?\/fp\\?\/([a-zA-Z0-9]+)-cc_ft_(\d+)\.(?:jpg|webp)/g;
+  /photos\.zillowstatic\.com\\?\/fp\\?\/([a-zA-Z0-9]{8,})-cc_ft_\d+\.(?:jpg|webp)/g;
 
 const DESKTOP_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-// PerimeterX and other challenge markers we can detect from the page.
 const CHALLENGE_MARKERS = [
   "px-captcha",
   "perimeterx",
-  "Please verify you are a human",
   "captcha-delivery",
+  "Please verify you are a human",
   "/_Incapsula_Resource",
   "Access to this page has been denied",
 ];
@@ -57,9 +54,125 @@ function slugFromUrl(rawUrl: string): string {
   }
 }
 
+function collectHashes(source: string): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const m of source.matchAll(PHOTO_URL_RE)) {
+    const h = m[1];
+    if (!seen.has(h)) {
+      seen.add(h);
+      ordered.push(h);
+    }
+  }
+  return ordered;
+}
+
+// ─── STRATEGY 1: Wayback Machine ────────────────────────────────────
+// Zero bot detection. Photo hashes in the archived HTML still resolve
+// on photos.zillowstatic.com today because Zillow doesn't rotate them.
+async function tryWayback(
+  targetUrl: string,
+): Promise<{ hashes: string[]; note: string }> {
+  const availUrl =
+    "https://archive.org/wayback/available?url=" + encodeURIComponent(targetUrl);
+  const availRes = await fetch(availUrl, {
+    headers: { "User-Agent": DESKTOP_USER_AGENT },
+    signal: AbortSignal.timeout(8_000),
+  });
+  if (!availRes.ok) return { hashes: [], note: "avail-http-" + availRes.status };
+  const avail = (await availRes.json()) as {
+    archived_snapshots?: { closest?: { available: boolean; url?: string; timestamp?: string } };
+  };
+  const closest = avail?.archived_snapshots?.closest;
+  if (!closest?.available || !closest.timestamp) {
+    return { hashes: [], note: "no-snapshot" };
+  }
+
+  // "id_" identifier delivers the raw archived response (unwrapped by
+  // archive.org's toolbar frame), so photo URLs sit in the HTML clean.
+  const rawUrl = `https://web.archive.org/web/${closest.timestamp}id_/${targetUrl}`;
+  const rawRes = await fetch(rawUrl, {
+    headers: { "User-Agent": DESKTOP_USER_AGENT },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!rawRes.ok) return { hashes: [], note: "raw-http-" + rawRes.status };
+  const html = await rawRes.text();
+  const hashes = collectHashes(html);
+  return { hashes, note: `wayback-${closest.timestamp}` };
+}
+
+// ─── STRATEGY 2: ZenRows (only if API key set) ─────────────────────
+// Residential/premium proxy + native anti-bot bypass. ZenRows advertises
+// PerimeterX bypass explicitly. Free tier: 1000 requests. Set
+// ZENROWS_API_KEY on Vercel to enable.
+async function tryZenRows(
+  targetUrl: string,
+): Promise<{ hashes: string[]; note: string }> {
+  const key = process.env.ZENROWS_API_KEY;
+  if (!key) return { hashes: [], note: "no-key" };
+
+  const params = new URLSearchParams({
+    url: targetUrl,
+    apikey: key,
+    js_render: "true",
+    premium_proxy: "true",
+    antibot: "true",
+    wait: "4000",
+  });
+  const res = await fetch(
+    "https://api.zenrows.com/v1/?" + params.toString(),
+    { signal: AbortSignal.timeout(45_000) },
+  );
+  if (!res.ok) return { hashes: [], note: "zenrows-http-" + res.status };
+  const html = await res.text();
+  return { hashes: collectHashes(html), note: "zenrows" };
+}
+
+// ─── STRATEGY 3: Playwright with manual stealth ────────────────────
+// The last-resort direct scrape. Loud on datacenter IPs but sometimes
+// works — especially outside peak PerimeterX challenge periods.
+const STEALTH_INIT = `
+(() => {
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch {}
+  try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch {}
+  try {
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [
+        { name: 'PDF Viewer' },
+        { name: 'Chrome PDF Viewer' },
+        { name: 'Chromium PDF Viewer' },
+        { name: 'Microsoft Edge PDF Viewer' },
+        { name: 'WebKit built-in PDF' },
+      ],
+    });
+  } catch {}
+  try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch {}
+  try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch {}
+  try {
+    window.chrome = window.chrome || { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
+  } catch {}
+  try {
+    const q = window.navigator.permissions && window.navigator.permissions.query;
+    if (q) {
+      window.navigator.permissions.query = (p) =>
+        p && p.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : q(p);
+    }
+  } catch {}
+  try {
+    const gp = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      return gp.apply(this, [p]);
+    };
+  } catch {}
+})();
+`;
+
 async function launchBrowser(): Promise<Browser> {
   const isLocal = !process.env.VERCEL && !process.env.AWS_REGION;
-
   const stealthArgs = [
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process,Translate",
@@ -69,143 +182,26 @@ async function launchBrowser(): Promise<Browser> {
   ];
 
   if (isLocal) {
-    const localPath =
-      process.env.CHROMIUM_EXECUTABLE_PATH ||
-      process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
-      undefined;
-    return (await extraChromium.launch({
+    return playwrightChromium.launch({
       headless: true,
-      executablePath: localPath,
+      executablePath:
+        process.env.CHROMIUM_EXECUTABLE_PATH ||
+        process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
+        undefined,
       args: stealthArgs,
-    })) as unknown as Browser;
+    });
   }
 
   const packUrl = process.env.CHROMIUM_PACK_URL || DEFAULT_CHROMIUM_PACK;
   const executablePath = await chromiumPack.executablePath(packUrl);
-  return (await extraChromium.launch({
+  return playwrightChromium.launch({
     args: [...chromiumPack.args, ...stealthArgs],
     executablePath,
     headless: true,
-  })) as unknown as Browser;
-}
-
-type PhotoRecord = { hash: string; maxSize: number };
-
-function ingestMatches(source: string, sink: Map<string, PhotoRecord>) {
-  for (const m of source.matchAll(PHOTO_URL_RE)) {
-    const hash = m[1];
-    const size = Number(m[2]) || 0;
-    const existing = sink.get(hash);
-    if (!existing || size > existing.maxSize) {
-      sink.set(hash, { hash, maxSize: Math.max(size, existing?.maxSize ?? 0) });
-    }
-  }
-}
-
-async function humanNudge(page: Page) {
-  // Cheap human-like sequence: mouse jitter, small scroll, brief pause.
-  try {
-    await page.mouse.move(220, 340, { steps: 8 });
-    await page.mouse.move(520, 260, { steps: 12 });
-    await page.waitForTimeout(400);
-    await page.evaluate(() =>
-      window.scrollBy({ top: 600, left: 0, behavior: "instant" as ScrollBehavior }),
-    );
-    await page.waitForTimeout(600);
-  } catch {}
-}
-
-async function pageLooksBlocked(page: Page): Promise<boolean> {
-  try {
-    const html = (await page.content()).slice(0, 30_000);
-    return CHALLENGE_MARKERS.some((m) => html.includes(m));
-  } catch {
-    return false;
-  }
-}
-
-async function extractOnce(
-  context: BrowserContext,
-  targetUrl: string,
-): Promise<{ hashes: string[]; addressSlug: string | null; blocked: boolean }> {
-  const page = await context.newPage();
-  const sink = new Map<string, PhotoRecord>();
-
-  page.on("response", (response) => {
-    const u = response.url();
-    if (u.includes("photos.zillowstatic.com")) ingestMatches(u, sink);
   });
-
-  await page.goto(targetUrl, {
-    waitUntil: "domcontentloaded",
-    timeout: 45_000,
-  });
-
-  // First-pass wait then human nudge, then a real settling wait.
-  await page.waitForTimeout(3_500);
-  await humanNudge(page);
-  await page
-    .waitForLoadState("networkidle", { timeout: 12_000 })
-    .catch(() => undefined);
-
-  // Bottom scroll to fully coax the gallery lazy-load, then back up.
-  await page.evaluate(() =>
-    window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" as ScrollBehavior }),
-  );
-  await page.waitForTimeout(2_000);
-  await page.evaluate(() =>
-    window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior }),
-  );
-  await page.waitForTimeout(1_200);
-
-  const blocked = await pageLooksBlocked(page);
-  const html = await page.content();
-  ingestMatches(html, sink);
-
-  const scriptTexts: string[] = await page
-    .$$eval("script", (nodes) => nodes.map((n) => n.textContent || ""))
-    .catch(() => []);
-  for (const text of scriptTexts) {
-    if (text.includes("photos.zillowstatic.com")) ingestMatches(text, sink);
-  }
-
-  let addressSlug: string | null = null;
-  try {
-    addressSlug = await page.$$eval(
-      "script[type='application/ld+json']",
-      (nodes) => {
-        for (const n of nodes) {
-          try {
-            const data = JSON.parse(n.textContent || "");
-            const items = Array.isArray(data) ? data : [data];
-            for (const item of items) {
-              const addr = item?.address;
-              if (addr && (addr.streetAddress || addr.addressLocality)) {
-                const parts = [
-                  addr.streetAddress,
-                  addr.addressLocality,
-                  addr.addressRegion,
-                  addr.postalCode,
-                ].filter(Boolean);
-                return parts.join(" ");
-              }
-            }
-          } catch {}
-        }
-        return null;
-      },
-    );
-  } catch {}
-
-  await page.close().catch(() => undefined);
-  return {
-    hashes: Array.from(sink.values()).map((r) => r.hash),
-    addressSlug,
-    blocked,
-  };
 }
 
-function buildContextOptions(): Parameters<Browser["newContext"]>[0] {
+function contextOptions(): Parameters<Browser["newContext"]>[0] {
   return {
     userAgent: DESKTOP_USER_AGENT,
     viewport: { width: 1400, height: 1000 },
@@ -231,15 +227,89 @@ function buildContextOptions(): Parameters<Browser["newContext"]>[0] {
   };
 }
 
+async function scrapeWithPage(
+  ctx: BrowserContext,
+  targetUrl: string,
+): Promise<{ hashes: string[]; blocked: boolean }> {
+  const page: Page = await ctx.newPage();
+  const seen = new Set<string>();
+
+  page.on("response", (r) => {
+    const u = r.url();
+    if (u.includes("photos.zillowstatic.com")) {
+      for (const m of u.matchAll(PHOTO_URL_RE)) seen.add(m[1]);
+    }
+  });
+
+  await page.goto(targetUrl, {
+    waitUntil: "domcontentloaded",
+    timeout: 45_000,
+  });
+  await page.waitForTimeout(3_500);
+  try {
+    await page.mouse.move(220, 340, { steps: 8 });
+    await page.mouse.move(520, 260, { steps: 12 });
+  } catch {}
+  await page
+    .waitForLoadState("networkidle", { timeout: 12_000 })
+    .catch(() => undefined);
+  await page.evaluate(() =>
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" as ScrollBehavior }),
+  );
+  await page.waitForTimeout(2_000);
+  await page.evaluate(() =>
+    window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior }),
+  );
+  await page.waitForTimeout(1_200);
+
+  const html = await page.content();
+  const blocked = CHALLENGE_MARKERS.some((m) => html.includes(m));
+  for (const h of collectHashes(html)) seen.add(h);
+
+  const scriptTexts = await page
+    .$$eval("script", (ns) => ns.map((n) => n.textContent || ""))
+    .catch(() => []);
+  for (const t of scriptTexts) {
+    if (t.includes("photos.zillowstatic.com")) {
+      for (const h of collectHashes(t)) seen.add(h);
+    }
+  }
+
+  await page.close().catch(() => undefined);
+  return { hashes: Array.from(seen), blocked };
+}
+
+async function tryPlaywright(
+  targetUrl: string,
+): Promise<{ hashes: string[]; note: string }> {
+  let browser: Browser | null = null;
+  try {
+    browser = await launchBrowser();
+    const ctx = await browser.newContext(contextOptions());
+    await ctx.addInitScript(STEALTH_INIT);
+    const first = await scrapeWithPage(ctx, targetUrl);
+    await ctx.close().catch(() => undefined);
+    if (first.hashes.length > 0) {
+      return { hashes: first.hashes, note: "playwright" };
+    }
+    return {
+      hashes: [],
+      note: first.blocked ? "playwright-blocked" : "playwright-empty",
+    };
+  } catch (err) {
+    console.error("playwright error:", err);
+    return { hashes: [], note: "playwright-error" };
+  } finally {
+    if (browser) await browser.close().catch(() => undefined);
+  }
+}
+
 export async function POST(req: NextRequest) {
   let body: { url?: string };
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json(
-      { error: "Invalid request body." },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
   const rawUrl = body.url?.trim();
@@ -265,9 +335,6 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-
-  // Strip tracking params — they don't help scraping and may trip
-  // referral checks.
   for (const k of Array.from(parsed.searchParams.keys())) {
     if (k.startsWith("utm_") || k === "fbclid" || k === "gclid") {
       parsed.searchParams.delete(k);
@@ -275,65 +342,64 @@ export async function POST(req: NextRequest) {
   }
   const target = parsed.toString();
 
-  let browser: Browser | null = null;
+  const notes: string[] = [];
 
+  // 1. Wayback — fastest, most reliable, no bot check.
   try {
-    browser = await launchBrowser();
-
-    // First attempt on the canonical URL.
-    let ctx = await browser.newContext(buildContextOptions());
-    let result = await extractOnce(ctx, target);
-    await ctx.close().catch(() => undefined);
-
-    // If we got nothing but the page didn't look blocked, try one retry
-    // with a fresh context and slightly different UA fingerprint.
-    if (result.hashes.length === 0) {
-      ctx = await browser.newContext({
-        ...buildContextOptions(),
-        userAgent: DESKTOP_USER_AGENT.replace("10_15_7", "10_15_8"),
-      });
-      const retry = await extractOnce(ctx, target);
-      await ctx.close().catch(() => undefined);
-      if (retry.hashes.length > result.hashes.length) {
-        result = retry;
-      }
+    const r = await tryWayback(target);
+    notes.push(r.note);
+    if (r.hashes.length > 0) {
+      return respond(r.hashes, target, notes);
     }
-
-    if (result.hashes.length === 0) {
-      return NextResponse.json(
-        {
-          error: result.blocked
-            ? "Zillow blocked this request. Wait a minute and try again — the challenge usually clears fast."
-            : "No photos found on that page. Double-check the listing URL and try again.",
-        },
-        { status: 502 },
-      );
-    }
-
-    const photos = result.hashes.map(
-      (h) => `https://photos.zillowstatic.com/fp/${h}-cc_ft_1536.jpg`,
-    );
-
-    let slug = slugFromUrl(target);
-    if (result.addressSlug) {
-      const s = result.addressSlug
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "");
-      if (s.length > 0) slug = s;
-    }
-
-    return NextResponse.json({ photos, slug, sourceUrl: target });
   } catch (err) {
-    console.error("extract error:", err);
-    return NextResponse.json(
-      {
-        error:
-          "Zillow blocked this request. Wait a minute and try again — the challenge usually clears fast.",
-      },
-      { status: 502 },
-    );
-  } finally {
-    if (browser) await browser.close().catch(() => undefined);
+    console.warn("wayback failed:", err);
+    notes.push("wayback-throw");
   }
+
+  // 2. ZenRows if key set.
+  try {
+    const r = await tryZenRows(target);
+    if (r.note !== "no-key") notes.push(r.note);
+    if (r.hashes.length > 0) {
+      return respond(r.hashes, target, notes);
+    }
+  } catch (err) {
+    console.warn("zenrows failed:", err);
+    notes.push("zenrows-throw");
+  }
+
+  // 3. Playwright direct — the last resort. Often blocked on Vercel IPs.
+  try {
+    const r = await tryPlaywright(target);
+    notes.push(r.note);
+    if (r.hashes.length > 0) {
+      return respond(r.hashes, target, notes);
+    }
+  } catch (err) {
+    console.warn("playwright throw:", err);
+    notes.push("playwright-throw");
+  }
+
+  console.error("all strategies failed:", notes.join(","));
+  return NextResponse.json(
+    {
+      error:
+        "Zillow blocked this request and no fallback found photos. Try again in a minute, or set a ZENROWS_API_KEY on Vercel for a residential-IP path.",
+      strategies: notes,
+    },
+    { status: 502 },
+  );
+}
+
+function respond(hashes: string[], target: string, notes: string[]) {
+  const photos = hashes.map(
+    (h) => `https://photos.zillowstatic.com/fp/${h}-cc_ft_1536.jpg`,
+  );
+  console.log(`extract ok via ${notes[notes.length - 1]}: ${photos.length} photos`);
+  return NextResponse.json({
+    photos,
+    slug: slugFromUrl(target),
+    sourceUrl: target,
+    strategies: notes,
+  });
 }

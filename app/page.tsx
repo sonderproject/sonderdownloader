@@ -1,11 +1,47 @@
 "use client";
 
-import { useState, useEffect, useMemo, FormEvent } from "react";
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  FormEvent,
+  ChangeEvent,
+} from "react";
+import {
+  DndContext,
+  DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  ROOM_KEYS,
+  ROOM_LABEL,
+  RoomKey,
+  promptFor,
+  walkthroughRank,
+} from "@/lib/rooms";
+import {
+  renderWalkthroughVideo,
+  VideoProgress,
+  DEFAULT_VIDEO_OPTIONS,
+} from "@/lib/video";
 
-type ExtractedResult = {
-  photos: string[];
-  slug: string;
-  sourceUrl?: string;
+type Photo = {
+  id: string;
+  url: string;
+  room: RoomKey;
 };
 
 const PHOTO_HASH_RE =
@@ -24,15 +60,79 @@ function extractHashesFromHtml(html: string): string[] {
 }
 
 function slugFromZillowText(text: string): string {
-  // Try to find /homedetails/<slug>/ inside pasted HTML or a URL.
   const m = text.match(/\/homedetails\/([a-zA-Z0-9-]+)/);
   if (m) return m[1].toLowerCase();
   return "listing";
 }
 
-function hashesToPhotos(hashes: string[]): string[] {
-  return hashes.map(
-    (h) => `https://photos.zillowstatic.com/fp/${h}-cc_ft_1536.jpg`,
+function hashesToPhotos(hashes: string[]): Photo[] {
+  return hashes.map((h) => ({
+    id: h,
+    url: `https://photos.zillowstatic.com/fp/${h}-cc_ft_1536.jpg`,
+    room: "unknown" as RoomKey,
+  }));
+}
+
+function PhotoCard({
+  photo,
+  index,
+  onRoomChange,
+}: {
+  photo: Photo;
+  index: number;
+  onRoomChange: (id: string, room: RoomKey) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: photo.id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 10 : 1,
+    opacity: isDragging ? 0.7 : 1,
+  };
+  return (
+    <figure
+      ref={setNodeRef}
+      style={style}
+      className="glass overflow-hidden !p-0 group"
+    >
+      <div
+        className="relative aspect-[4/3] bg-black/30 touch-none cursor-grab active:cursor-grabbing"
+        {...attributes}
+        {...listeners}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={photo.url}
+          alt={`Photo ${index + 1}`}
+          loading="lazy"
+          draggable={false}
+          className="w-full h-full object-cover select-none pointer-events-none"
+        />
+        <span className="absolute top-2 left-2 microlabel text-[9px] text-text bg-black/60 px-2 py-1 rounded-sonder">
+          {String(index + 1).padStart(2, "0")}
+        </span>
+        {photo.room !== "unknown" && (
+          <span className="absolute top-2 right-2 microlabel text-[9px] text-text bg-accent/80 px-2 py-1 rounded-sonder">
+            {ROOM_LABEL[photo.room]}
+          </span>
+        )}
+      </div>
+      <div className="px-2 py-2 border-t border-white/10">
+        <select
+          value={photo.room}
+          onChange={(e) => onRoomChange(photo.id, e.target.value as RoomKey)}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="w-full bg-black/25 text-text text-xs font-sans px-2 py-1.5 rounded-sonder border border-white/10 focus:border-accent/60 focus:outline-none"
+        >
+          {ROOM_KEYS.map((k) => (
+            <option key={k} value={k}>
+              {ROOM_LABEL[k]}
+            </option>
+          ))}
+        </select>
+      </div>
+    </figure>
   );
 }
 
@@ -42,41 +142,63 @@ export default function Home() {
   const [url, setUrl] = useState("");
   const [zipping, setZipping] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<ExtractedResult | null>(null);
+  const [photos, setPhotos] = useState<Photo[]>([]);
+  const [slug, setSlug] = useState<string>("listing");
+  const [sourceUrl, setSourceUrl] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"bookmarklet" | "prompts" | null>(null);
 
-  // Bookmarklet drops the user here with #photos=hash1,hash2,...
+  // Video generation state
+  const [videoBusy, setVideoBusy] = useState(false);
+  const [videoProgress, setVideoProgress] = useState<VideoProgress | null>(null);
+  const [videoResult, setVideoResult] = useState<{
+    url: string;
+    ext: string;
+    duration: number;
+  } | null>(null);
+  const [videoAR, setVideoAR] = useState<"16:9" | "9:16">("16:9");
+  const [secondsPerPhoto, setSecondsPerPhoto] = useState(4);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const currentUrl = useRef<string | null>(null);
+  useEffect(() => {
+    // Revoke stale blob URLs when a new video is generated.
+    return () => {
+      if (currentUrl.current) URL.revokeObjectURL(currentUrl.current);
+    };
+  }, []);
+
+  // Bookmarklet drop-in: read hashes from URL fragment on mount.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const hash = window.location.hash;
     if (!hash) return;
     const params = new URLSearchParams(hash.slice(1));
     const list = params.get("photos");
-    const slug = params.get("slug") || "listing";
+    const s = params.get("slug") || "listing";
     if (list) {
-      const hashes = list.split(",").filter((s) => /^[a-zA-Z0-9]{8,}$/.test(s));
+      const hashes = list.split(",").filter((h) => /^[a-zA-Z0-9]{8,}$/.test(h));
       if (hashes.length > 0) {
-        setResult({ photos: hashesToPhotos(hashes), slug });
-        // Wipe the fragment so refresh doesn't re-trigger.
+        setPhotos(hashesToPhotos(hashes));
+        setSlug(s);
         history.replaceState(null, "", window.location.pathname);
       }
     }
   }, []);
 
   const bookmarklet = useMemo(() => {
-    const origin =
-      typeof window !== "undefined" ? window.location.origin : "";
-    // Runs in a Zillow tab: extracts photo hashes from the current
-    // page HTML and opens Sonder with them in the URL hash.
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
     const code = `(function(){var h=new Set(),o=[];var re=/photos\\.zillowstatic\\.com\\/fp\\/([a-zA-Z0-9]{8,})-cc_ft_\\d+\\.(?:jpg|webp)/g;var s=document.documentElement.outerHTML,m;while((m=re.exec(s))){if(!h.has(m[1])){h.add(m[1]);o.push(m[1]);}}var slug=(location.pathname.match(/\\/homedetails\\/([^\\/]+)/)||[])[1]||'listing';if(!o.length){alert('No Zillow photos found on this page. Open a listing detail page first.');return;}window.open('${origin}/#photos='+o.join(',')+'&slug='+encodeURIComponent(slug.toLowerCase()),'_blank');})();`;
     return "javascript:" + code;
   }, []);
 
-  async function handlePasteSubmit(e: FormEvent) {
+  function handlePasteSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    setResult(null);
     if (!pastedHtml.trim()) {
       setError("Paste the Zillow page source into the box below.");
       return;
@@ -84,23 +206,23 @@ export default function Home() {
     const hashes = extractHashesFromHtml(pastedHtml);
     if (hashes.length === 0) {
       setError(
-        "No Zillow photo URLs found in that HTML. Make sure you pasted the full page source from a listing detail page (right-click → View Page Source).",
+        "No Zillow photo URLs found in that HTML. Make sure you pasted the full page source from a listing detail page.",
       );
       return;
     }
-    setResult({
-      photos: hashesToPhotos(hashes),
-      slug: slugFromZillowText(pastedHtml),
-    });
+    setPhotos(hashesToPhotos(hashes));
+    setSlug(slugFromZillowText(pastedHtml));
+    setSourceUrl(undefined);
     setPastedHtml("");
+    setVideoResult(null);
   }
 
   async function handleUrlSubmit(e: FormEvent) {
     e.preventDefault();
     if (loading) return;
     setError(null);
-    setResult(null);
     setLoading(true);
+    setVideoResult(null);
     try {
       const res = await fetch("/api/extract", {
         method: "POST",
@@ -111,11 +233,16 @@ export default function Home() {
       if (!res.ok || data.error) {
         setError(
           data.error ||
-            "Zillow blocked that request. Try the Paste flow instead — it always works.",
+            "Zillow blocked that request. Try the Paste flow instead.",
         );
         return;
       }
-      setResult(data);
+      const hashes = (data.photos as string[])
+        .map((u) => u.match(/fp\/([a-zA-Z0-9]{8,})-cc_ft_/)?.[1] || "")
+        .filter(Boolean);
+      setPhotos(hashesToPhotos(hashes));
+      setSlug(data.slug || "listing");
+      setSourceUrl(data.sourceUrl);
     } catch {
       setError("Network error. Try the Paste flow instead.");
     } finally {
@@ -123,17 +250,17 @@ export default function Home() {
     }
   }
 
-  async function handleDownload() {
-    if (!result || zipping) return;
+  async function handleDownloadZip() {
+    if (photos.length === 0 || zipping) return;
     setZipping(true);
     try {
       const res = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          photos: result.photos,
-          slug: result.slug,
-          sourceUrl: result.sourceUrl || "https://www.zillow.com/",
+          photos: photos.map((p) => p.url),
+          slug,
+          sourceUrl: sourceUrl || "https://www.zillow.com/",
         }),
       });
       if (!res.ok) {
@@ -141,14 +268,7 @@ export default function Home() {
         return;
       }
       const blob = await res.blob();
-      const link = document.createElement("a");
-      const objectUrl = URL.createObjectURL(blob);
-      link.href = objectUrl;
-      link.download = `${result.slug}.zip`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(objectUrl);
+      triggerDownload(blob, `${slug}.zip`);
     } catch {
       setError("Could not build zip. Please try again.");
     } finally {
@@ -156,13 +276,99 @@ export default function Home() {
     }
   }
 
-  async function copyBookmarklet() {
-    try {
-      await navigator.clipboard.writeText(bookmarklet);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {}
+  function handleDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    setPhotos((items) => {
+      const oldIdx = items.findIndex((p) => p.id === active.id);
+      const newIdx = items.findIndex((p) => p.id === over.id);
+      return arrayMove(items, oldIdx, newIdx);
+    });
   }
+
+  function handleRoomChange(id: string, room: RoomKey) {
+    setPhotos((items) =>
+      items.map((p) => (p.id === id ? { ...p, room } : p)),
+    );
+  }
+
+  function handleSortWalkthrough() {
+    setPhotos((items) =>
+      [...items].sort((a, b) => walkthroughRank(a.room) - walkthroughRank(b.room)),
+    );
+  }
+
+  async function handleCopyPrompts() {
+    const lines = photos.map(
+      (p, i) =>
+        `${String(i + 1).padStart(2, "0")} · ${ROOM_LABEL[p.room]}\n${promptFor(p.room)}\n`,
+    );
+    const text = `Sonder walkthrough — ${slug}\n\n${lines.join("\n")}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied("prompts");
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      setError("Clipboard access denied.");
+    }
+  }
+
+  async function handleGenerateVideo() {
+    if (videoBusy || photos.length === 0) return;
+    setError(null);
+    setVideoBusy(true);
+    setVideoResult(null);
+    if (currentUrl.current) {
+      URL.revokeObjectURL(currentUrl.current);
+      currentUrl.current = null;
+    }
+    try {
+      const [w, h] =
+        videoAR === "16:9"
+          ? [DEFAULT_VIDEO_OPTIONS.width, DEFAULT_VIDEO_OPTIONS.height]
+          : [1080, 1920];
+      const result = await renderWalkthroughVideo(
+        photos.map((p) => p.url),
+        { width: w, height: h, secondsPerPhoto },
+        setVideoProgress,
+      );
+      const objectUrl = URL.createObjectURL(result.blob);
+      currentUrl.current = objectUrl;
+      setVideoResult({
+        url: objectUrl,
+        ext: result.ext,
+        duration: result.durationSeconds,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Video generation failed.");
+    } finally {
+      setVideoBusy(false);
+      setVideoProgress(null);
+    }
+  }
+
+  function handleCopyBookmarklet() {
+    navigator.clipboard.writeText(bookmarklet).then(
+      () => {
+        setCopied("bookmarklet");
+        setTimeout(() => setCopied(null), 2000);
+      },
+      () => setError("Clipboard access denied."),
+    );
+  }
+
+  function triggerDownload(blob: Blob, name: string) {
+    const link = document.createElement("a");
+    const objectUrl = URL.createObjectURL(blob);
+    link.href = objectUrl;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  }
+
+  const hasPhotos = photos.length > 0;
 
   return (
     <main className="min-h-screen w-full flex flex-col text-text">
@@ -212,57 +418,43 @@ export default function Home() {
             </span>
           </h1>
           <p className="mt-6 font-sans text-text-dim max-w-2xl text-base md:text-lg leading-relaxed">
-            Two ways in — both free, both take seconds. Zillow blocks
-            server-side scrapers, so we do the extraction in your browser
-            instead. Paste the page source, or use the one-click bookmarklet.
+            Grab every photo from a Zillow listing, order them into a
+            walkthrough, and render a cinematic Ken-Burns video — all in your
+            browser. Prompts ready to hand to Kling, Higgsfield, or Runway.
           </p>
 
           <div className="mt-10 flex gap-2 border-b border-white/10">
-            <button
-              onClick={() => {
-                setMode("paste");
-                setError(null);
-              }}
-              className={`px-4 py-3 text-xs uppercase tracking-widest font-sans transition ${
-                mode === "paste"
-                  ? "text-text border-b-2 border-accent -mb-px"
-                  : "text-text-dim hover:text-text"
-              }`}
-            >
-              Paste HTML
-            </button>
-            <button
-              onClick={() => {
-                setMode("url");
-                setError(null);
-              }}
-              className={`px-4 py-3 text-xs uppercase tracking-widest font-sans transition ${
-                mode === "url"
-                  ? "text-text border-b-2 border-accent -mb-px"
-                  : "text-text-dim hover:text-text"
-              }`}
-            >
-              URL{" "}
-              <span className="opacity-50 normal-case tracking-normal ml-1">
-                (fallback)
-              </span>
-            </button>
+            {(["paste", "url"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => {
+                  setMode(m);
+                  setError(null);
+                }}
+                className={`px-4 py-3 text-xs uppercase tracking-widest font-sans transition ${
+                  mode === m
+                    ? "text-text border-b-2 border-accent -mb-px"
+                    : "text-text-dim hover:text-text"
+                }`}
+              >
+                {m === "paste" ? "Paste HTML" : "URL (fallback)"}
+              </button>
+            ))}
           </div>
 
           {mode === "paste" && (
             <form onSubmit={handlePasteSubmit} className="mt-8">
               <div className="glass p-5 md:p-6">
-                <label
-                  htmlFor="paste"
-                  className="microlabel block mb-3"
-                >
+                <label htmlFor="paste" className="microlabel block mb-3">
                   Zillow Page Source
                 </label>
                 <textarea
                   id="paste"
                   required
                   value={pastedHtml}
-                  onChange={(e) => setPastedHtml(e.target.value)}
+                  onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                    setPastedHtml(e.target.value)
+                  }
                   placeholder="Paste the full page source of a Zillow listing here…"
                   spellCheck={false}
                   className="w-full h-40 px-4 py-3 bg-black/25 border border-white/10 rounded-sonder-lg text-text placeholder:text-text-subtle font-mono text-xs leading-relaxed focus:outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20 transition"
@@ -285,9 +477,8 @@ export default function Home() {
               <div className="mt-6 glass p-5 md:p-6">
                 <p className="microlabel mb-3">Or — one-click bookmarklet</p>
                 <p className="text-text-dim text-sm leading-relaxed mb-4">
-                  Drag this button to your bookmarks bar. Then on any Zillow
-                  listing, click it — the tool opens with all photos already
-                  extracted. Nothing sent to a server.
+                  Drag the button below to your bookmarks bar. On any Zillow
+                  listing, click it — Sonder opens with all photos ready.
                 </p>
                 <div className="flex flex-col md:flex-row gap-3 items-start md:items-center">
                   {/* eslint-disable-next-line @next/next/no-html-link-for-pages, jsx-a11y/anchor-is-valid */}
@@ -302,10 +493,10 @@ export default function Home() {
                   </a>
                   <button
                     type="button"
-                    onClick={copyBookmarklet}
+                    onClick={handleCopyBookmarklet}
                     className="btn-ghost"
                   >
-                    {copied ? "Copied" : "Copy JS"}
+                    {copied === "bookmarklet" ? "Copied" : "Copy JS"}
                   </button>
                 </div>
               </div>
@@ -315,10 +506,7 @@ export default function Home() {
           {mode === "url" && (
             <form onSubmit={handleUrlSubmit} className="mt-8">
               <div className="glass p-5 md:p-6">
-                <label
-                  htmlFor="url"
-                  className="microlabel block mb-3"
-                >
+                <label htmlFor="url" className="microlabel block mb-3">
                   Zillow Listing URL
                 </label>
                 <div className="flex flex-col md:flex-row gap-3 md:gap-4 items-stretch">
@@ -357,47 +545,172 @@ export default function Home() {
             </div>
           )}
 
-          {result && result.photos.length > 0 && (
+          {hasPhotos && (
             <div className="mt-16">
-              <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-5 mb-8">
+              <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-5 mb-6">
                 <div>
-                  <p className="eyebrow mb-3">Result</p>
+                  <p className="eyebrow mb-3">Photos</p>
                   <h2 className="font-display text-text text-3xl md:text-4xl leading-tight font-medium">
-                    {result.photos.length} photo
-                    {result.photos.length === 1 ? "" : "s"} · max resolution
+                    {photos.length} photo{photos.length === 1 ? "" : "s"} · max
+                    resolution
                   </h2>
-                  <p className="mt-2 microlabel">{result.slug}</p>
+                  <p className="mt-2 microlabel">{slug}</p>
                 </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 mb-6">
                 <button
-                  onClick={handleDownload}
-                  disabled={zipping}
-                  className="btn-primary self-start md:self-auto"
+                  onClick={handleSortWalkthrough}
+                  className="btn-ghost"
+                  title="Reorder photos by canonical walkthrough sequence"
                 >
-                  {zipping ? "Zipping…" : "Download Archive (.zip)"}
+                  Sort to Walkthrough
+                </button>
+                <button
+                  onClick={handleDownloadZip}
+                  disabled={zipping}
+                  className="btn-ghost"
+                >
+                  {zipping ? "Zipping…" : "Download Photos .zip"}
+                </button>
+                <button
+                  onClick={handleCopyPrompts}
+                  className="btn-ghost"
+                  title="Copy Kling/Higgsfield/Runway prompts to clipboard"
+                >
+                  {copied === "prompts" ? "Copied" : "Copy AI Prompts"}
                 </button>
               </div>
 
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                {result.photos.map((photo, i) => (
-                  <figure
-                    key={photo}
-                    className="glass overflow-hidden !p-0"
-                    style={{ borderRadius: 8 }}
-                  >
-                    <div className="relative aspect-[4/3] bg-black/30">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={photo}
-                        alt={`Listing photo ${i + 1}`}
-                        loading="lazy"
-                        className="w-full h-full object-cover"
+              <p className="microlabel text-[10px] opacity-80 mb-4">
+                Drag tiles to reorder. Set a category on each so the auto-sort
+                and prompts know what each room is.
+              </p>
+
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragEnd={handleDragEnd}
+              >
+                <SortableContext
+                  items={photos.map((p) => p.id)}
+                  strategy={rectSortingStrategy}
+                >
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {photos.map((p, i) => (
+                      <PhotoCard
+                        key={p.id}
+                        photo={p}
+                        index={i}
+                        onRoomChange={handleRoomChange}
                       />
-                      <figcaption className="absolute bottom-2 left-2 microlabel text-[9px] text-text/80">
-                        {String(i + 1).padStart(2, "0")}
-                      </figcaption>
+                    ))}
+                  </div>
+                </SortableContext>
+              </DndContext>
+
+              <div className="mt-16">
+                <p className="eyebrow mb-3">Walkthrough Video</p>
+                <h3 className="font-display text-text text-2xl md:text-3xl leading-tight font-medium mb-2">
+                  Render a Ken-Burns walkthrough
+                </h3>
+                <p className="text-text-dim text-sm leading-relaxed mb-6 max-w-xl">
+                  Slow zoom+pan on each photo with cross-fades. Rendered
+                  entirely in your browser. Feed the output to Kling or upload
+                  to Reels/TikTok/Shorts.
+                </p>
+
+                <div className="glass p-5 md:p-6">
+                  <div className="flex flex-col md:flex-row md:items-end gap-5 md:gap-8">
+                    <div>
+                      <p className="microlabel mb-2">Aspect</p>
+                      <div className="flex gap-1">
+                        {(["16:9", "9:16"] as const).map((a) => (
+                          <button
+                            key={a}
+                            onClick={() => setVideoAR(a)}
+                            className={`px-3 py-2 text-xs uppercase tracking-widest rounded-sonder border transition ${
+                              videoAR === a
+                                ? "border-accent text-text bg-accent/20"
+                                : "border-white/15 text-text-dim hover:text-text"
+                            }`}
+                          >
+                            {a}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </figure>
-                ))}
+                    <div>
+                      <p className="microlabel mb-2">
+                        Seconds / photo — {secondsPerPhoto}s
+                      </p>
+                      <input
+                        type="range"
+                        min={2}
+                        max={8}
+                        step={0.5}
+                        value={secondsPerPhoto}
+                        onChange={(e) =>
+                          setSecondsPerPhoto(parseFloat(e.target.value))
+                        }
+                        className="w-40 accent-accent"
+                      />
+                    </div>
+                    <div className="md:ml-auto">
+                      <button
+                        onClick={handleGenerateVideo}
+                        disabled={videoBusy}
+                        className="btn-primary"
+                      >
+                        {videoBusy ? "Rendering…" : "Generate Video"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {videoBusy && videoProgress && (
+                    <div className="mt-5">
+                      <div className="microlabel mb-2">
+                        {videoProgress.phase === "loading"
+                          ? `Loading ${videoProgress.photoIndex + 1} / ${videoProgress.totalPhotos}`
+                          : videoProgress.phase === "rendering"
+                            ? `Rendering ${Math.round(videoProgress.frameRatio * 100)}%`
+                            : "Encoding…"}
+                      </div>
+                      <div className="h-1 bg-white/10 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-accent transition-[width]"
+                          style={{
+                            width: `${Math.round(videoProgress.frameRatio * 100)}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {videoResult && (
+                    <div className="mt-6">
+                      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+                      <video
+                        src={videoResult.url}
+                        controls
+                        playsInline
+                        className="w-full rounded-sonder-lg"
+                      />
+                      <div className="mt-4 flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+                        <p className="microlabel">
+                          {Math.round(videoResult.duration)}s · {videoResult.ext.toUpperCase()}
+                        </p>
+                        <a
+                          href={videoResult.url}
+                          download={`${slug}-walkthrough.${videoResult.ext}`}
+                          className="btn-primary self-start md:self-auto no-underline"
+                        >
+                          Download Video
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

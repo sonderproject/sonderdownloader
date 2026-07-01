@@ -3,41 +3,116 @@
 @tailwind utilities;
 
 :root {
-  --background: #F3EDE3;
-  --foreground: #141210;
+  --bg: #0A0A09;
+  --text: #EDE9E3;
+  --text-dim: rgba(237, 233, 227, 0.62);
+  --text-subtle: rgba(237, 233, 227, 0.22);
+  --accent: #3E9BD4;
+  --accent-bright: #6FC3F0;
+  --accent-rgb: 62, 155, 212;
+  --radius: 4px;
+  --glass-bg:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.04) 100%),
+    rgba(18, 20, 24, 0.46);
+  --glass-border: rgba(255, 255, 255, 0.16);
+  --glass-blur: blur(30px) saturate(1.8);
+  --glass-shadow: 0 14px 44px rgba(0, 0, 0, 0.40);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 
 html,
 body {
-  background-color: var(--background);
-  color: var(--foreground);
-  font-feature-settings: "ss01", "onum";
+  background-color: var(--bg);
+  color: var(--text);
+  overflow-x: hidden;
 }
 
 body {
   min-height: 100vh;
+  background-image:
+    radial-gradient(ellipse 60% 40% at 20% 0%, rgba(62, 155, 212, 0.10), transparent 60%),
+    radial-gradient(ellipse 50% 40% at 100% 110%, rgba(111, 195, 240, 0.06), transparent 60%);
 }
 
-/* Editorial serif fine-tuning */
-.font-serif {
-  font-feature-settings: "ss01", "onum";
-  letter-spacing: -0.015em;
+.glass {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--glass-shadow), var(--glass-highlight);
+  border-radius: 12px;
 }
 
-/* Thin hairline divider used across the layout */
-.hairline {
-  height: 1px;
-  background-color: rgba(20, 18, 16, 0.14);
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-inter), "Inter", system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #04121c;
+  background: linear-gradient(180deg, var(--accent-bright) 0%, var(--accent) 100%);
+  padding: 15px 34px;
+  border-radius: 8px;
+  border: 0;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 6px 22px rgba(var(--accent-rgb), 0.32);
+  transition: transform 0.2s ease, box-shadow 0.3s ease;
+  cursor: pointer;
 }
 
-/* Understated caret used in place of arrow icons */
-.caret::after {
-  content: "→";
-  display: inline-block;
-  margin-left: 0.4em;
-  transition: transform 200ms ease;
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 10px 28px rgba(var(--accent-rgb), 0.42);
 }
 
-.caret:hover::after {
-  transform: translateX(3px);
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-inter), "Inter", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text);
+  background: transparent;
+  padding: 13px 24px;
+  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  transition: border-color 0.25s ease, color 0.25s ease;
+  cursor: pointer;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.32);
+  color: var(--accent-bright);
+}
+
+.eyebrow {
+  font-family: var(--font-inter), "Inter", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.microlabel {
+  font-family: var(--font-inter), "Inter", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--text-dim);
 }

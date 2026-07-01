@@ -3,6 +3,8 @@ const nextConfig = {
   experimental: {
     serverComponentsExternalPackages: [
       "playwright-core",
+      "playwright-extra",
+      "puppeteer-extra-plugin-stealth",
       "@sparticuz/chromium-min",
     ],
   },

@@ -1,15 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import chromium from "@sparticuz/chromium-min";
-import {
-  chromium as playwrightChromium,
-  type Browser,
-  type BrowserContext,
-} from "playwright-core";
+import chromiumPack from "@sparticuz/chromium-min";
+// playwright-extra wraps playwright-core so we can attach the stealth
+// plugin from the puppeteer-extra ecosystem (they share the same plugin
+// interface). This adds ~20 evasions on top of what we can do by hand.
+import { chromium as extraChromium } from "playwright-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import type { Browser, BrowserContext, Page } from "playwright-core";
+
+extraChromium.use(StealthPlugin());
 
 export const runtime = "nodejs";
-// NOTE: Vercel Hobby caps serverless functions at 10s. The extract flow
-// (Chromium cold boot + PerimeterX-friendly render/wait cycle) routinely
-// takes 20–40s, so this route requires Vercel Pro (or higher) in prod.
+// Vercel Hobby caps at 10s; extraction (browser boot + PerimeterX-safe
+// render/wait) routinely takes 20–40s, so Vercel Pro is required.
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
@@ -18,15 +20,24 @@ const DEFAULT_CHROMIUM_PACK =
 
 const ZILLOW_HOST_RE = /(^|\.)zillow\.com$/i;
 
-// Match any Zillow static-photo URL. We capture the hash (unique per
-// photo) and the size suffix. We accept .jpg AND .webp because Zillow
-// serves both, and we've also seen the size suffix vary — dedup by hash.
+// Dedup key = photo hash. Size suffix is captured only so we can pick
+// the largest observed for logging; we always rebuild at cc_ft_1536.
 const PHOTO_URL_RE =
   /photos\.zillowstatic\.com\\?\/fp\\?\/([a-zA-Z0-9]+)-cc_ft_(\d+)\.(?:jpg|webp)/g;
 
 const DESKTOP_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+// PerimeterX and other challenge markers we can detect from the page.
+const CHALLENGE_MARKERS = [
+  "px-captcha",
+  "perimeterx",
+  "Please verify you are a human",
+  "captcha-delivery",
+  "/_Incapsula_Resource",
+  "Access to this page has been denied",
+];
 
 function slugFromUrl(rawUrl: string): string {
   try {
@@ -45,68 +56,15 @@ function slugFromUrl(rawUrl: string): string {
   }
 }
 
-// Stealth patches — quiet the loudest "I'm a headless bot" signals
-// PerimeterX looks for. Not a full stealth plugin, but enough to get
-// past the first-tier automated checks.
-const STEALTH_INIT = `
-(() => {
-  try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  } catch {}
-  try {
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en'],
-    });
-  } catch {}
-  try {
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [
-        { name: 'PDF Viewer' },
-        { name: 'Chrome PDF Viewer' },
-        { name: 'Chromium PDF Viewer' },
-        { name: 'Microsoft Edge PDF Viewer' },
-        { name: 'WebKit built-in PDF' },
-      ],
-    });
-  } catch {}
-  try {
-    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-  } catch {}
-  try {
-    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
-  } catch {}
-  try {
-    window.chrome = window.chrome || { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
-  } catch {}
-  try {
-    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
-    if (origQuery) {
-      window.navigator.permissions.query = (params) =>
-        params && params.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission })
-          : origQuery(params);
-    }
-  } catch {}
-  try {
-    const getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (parameter) {
-      if (parameter === 37445) return 'Intel Inc.';
-      if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-      return getParameter.apply(this, [parameter]);
-    };
-  } catch {}
-})();
-`;
-
 async function launchBrowser(): Promise<Browser> {
   const isLocal = !process.env.VERCEL && !process.env.AWS_REGION;
 
-  // Extra args that specifically defeat headless-detection. We add
-  // these on top of whatever @sparticuz/chromium-min already ships.
   const stealthArgs = [
     "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-features=IsolateOrigins,site-per-process,Translate",
+    "--disable-dev-shm-usage",
     "--no-default-browser-check",
+    "--no-first-run",
   ];
 
   if (isLocal) {
@@ -114,22 +72,20 @@ async function launchBrowser(): Promise<Browser> {
       process.env.CHROMIUM_EXECUTABLE_PATH ||
       process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
       undefined;
-
-    return await playwrightChromium.launch({
+    return (await extraChromium.launch({
       headless: true,
       executablePath: localPath,
       args: stealthArgs,
-    });
+    })) as unknown as Browser;
   }
 
   const packUrl = process.env.CHROMIUM_PACK_URL || DEFAULT_CHROMIUM_PACK;
-  const executablePath = await chromium.executablePath(packUrl);
-
-  return await playwrightChromium.launch({
-    args: [...chromium.args, ...stealthArgs],
+  const executablePath = await chromiumPack.executablePath(packUrl);
+  return (await extraChromium.launch({
+    args: [...chromiumPack.args, ...stealthArgs],
     executablePath,
     headless: true,
-  });
+  })) as unknown as Browser;
 }
 
 type PhotoRecord = { hash: string; maxSize: number };
@@ -145,18 +101,38 @@ function ingestMatches(source: string, sink: Map<string, PhotoRecord>) {
   }
 }
 
-async function extractPhotos(
+async function humanNudge(page: Page) {
+  // Cheap human-like sequence: mouse jitter, small scroll, brief pause.
+  try {
+    await page.mouse.move(220, 340, { steps: 8 });
+    await page.mouse.move(520, 260, { steps: 12 });
+    await page.waitForTimeout(400);
+    await page.evaluate(() =>
+      window.scrollBy({ top: 600, left: 0, behavior: "instant" as ScrollBehavior }),
+    );
+    await page.waitForTimeout(600);
+  } catch {}
+}
+
+async function pageLooksBlocked(page: Page): Promise<boolean> {
+  try {
+    const html = (await page.content()).slice(0, 30_000);
+    return CHALLENGE_MARKERS.some((m) => html.includes(m));
+  } catch {
+    return false;
+  }
+}
+
+async function extractOnce(
   context: BrowserContext,
   targetUrl: string,
-): Promise<{ hashes: string[]; addressSlug: string | null }> {
+): Promise<{ hashes: string[]; addressSlug: string | null; blocked: boolean }> {
   const page = await context.newPage();
   const sink = new Map<string, PhotoRecord>();
 
   page.on("response", (response) => {
     const u = response.url();
-    if (u.includes("photos.zillowstatic.com")) {
-      ingestMatches(u, sink);
-    }
+    if (u.includes("photos.zillowstatic.com")) ingestMatches(u, sink);
   });
 
   await page.goto(targetUrl, {
@@ -164,10 +140,14 @@ async function extractPhotos(
     timeout: 45_000,
   });
 
-  // Give PerimeterX + hydration a beat, then coax lazy-loaded galleries
-  // by scrolling to the bottom, back up, and simulating a small mouse move.
-  await page.waitForTimeout(4_000);
-  await page.mouse.move(200, 300);
+  // First-pass wait then human nudge, then a real settling wait.
+  await page.waitForTimeout(3_500);
+  await humanNudge(page);
+  await page
+    .waitForLoadState("networkidle", { timeout: 12_000 })
+    .catch(() => undefined);
+
+  // Bottom scroll to fully coax the gallery lazy-load, then back up.
   await page.evaluate(() =>
     window.scrollTo({ top: document.body.scrollHeight, behavior: "instant" as ScrollBehavior }),
   );
@@ -175,51 +155,79 @@ async function extractPhotos(
   await page.evaluate(() =>
     window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior }),
   );
-  await page.waitForTimeout(1_500);
+  await page.waitForTimeout(1_200);
 
+  const blocked = await pageLooksBlocked(page);
   const html = await page.content();
   ingestMatches(html, sink);
 
-  // Scan every script tag independently — some ship as raw JSON blobs
-  // (__NEXT_DATA__, hdpApolloPreloadedData, hdpApolloState) that only
-  // contain photo URLs inside stringified data with escaped slashes.
   const scriptTexts: string[] = await page
     .$$eval("script", (nodes) => nodes.map((n) => n.textContent || ""))
     .catch(() => []);
   for (const text of scriptTexts) {
-    if (text.includes("photos.zillowstatic.com")) {
-      ingestMatches(text, sink);
-    }
+    if (text.includes("photos.zillowstatic.com")) ingestMatches(text, sink);
   }
 
-  // Best-effort: pull the listing address from JSON-LD if present.
   let addressSlug: string | null = null;
   try {
-    addressSlug = await page.$$eval("script[type='application/ld+json']", (nodes) => {
-      for (const n of nodes) {
-        try {
-          const data = JSON.parse(n.textContent || "");
-          const items = Array.isArray(data) ? data : [data];
-          for (const item of items) {
-            const addr = item?.address;
-            if (addr && (addr.streetAddress || addr.addressLocality)) {
-              const parts = [
-                addr.streetAddress,
-                addr.addressLocality,
-                addr.addressRegion,
-                addr.postalCode,
-              ].filter(Boolean);
-              return parts.join(" ");
+    addressSlug = await page.$$eval(
+      "script[type='application/ld+json']",
+      (nodes) => {
+        for (const n of nodes) {
+          try {
+            const data = JSON.parse(n.textContent || "");
+            const items = Array.isArray(data) ? data : [data];
+            for (const item of items) {
+              const addr = item?.address;
+              if (addr && (addr.streetAddress || addr.addressLocality)) {
+                const parts = [
+                  addr.streetAddress,
+                  addr.addressLocality,
+                  addr.addressRegion,
+                  addr.postalCode,
+                ].filter(Boolean);
+                return parts.join(" ");
+              }
             }
-          }
-        } catch {}
-      }
-      return null;
-    });
+          } catch {}
+        }
+        return null;
+      },
+    );
   } catch {}
 
-  const hashes = Array.from(sink.values()).map((r) => r.hash);
-  return { hashes, addressSlug };
+  await page.close().catch(() => undefined);
+  return {
+    hashes: Array.from(sink.values()).map((r) => r.hash),
+    addressSlug,
+    blocked,
+  };
+}
+
+function buildContextOptions(): Parameters<Browser["newContext"]>[0] {
+  return {
+    userAgent: DESKTOP_USER_AGENT,
+    viewport: { width: 1400, height: 1000 },
+    locale: "en-US",
+    timezoneId: "America/Los_Angeles",
+    javaScriptEnabled: true,
+    bypassCSP: true,
+    extraHTTPHeaders: {
+      "Accept-Language": "en-US,en;q=0.9",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif," +
+        "image/webp,image/apng,*/*;q=0.8",
+      "Sec-Ch-Ua":
+        '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+      "Sec-Ch-Ua-Mobile": "?0",
+      "Sec-Ch-Ua-Platform": '"macOS"',
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      "Upgrade-Insecure-Requests": "1",
+    },
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -250,7 +258,6 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-
   if (!ZILLOW_HOST_RE.test(parsed.hostname)) {
     return NextResponse.json(
       { error: "Only zillow.com listing URLs are supported." },
@@ -258,71 +265,74 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Strip tracking params — they don't help scraping and may trip
+  // referral checks.
+  for (const k of Array.from(parsed.searchParams.keys())) {
+    if (k.startsWith("utm_") || k === "fbclid" || k === "gclid") {
+      parsed.searchParams.delete(k);
+    }
+  }
+  const target = parsed.toString();
+
   let browser: Browser | null = null;
 
   try {
     browser = await launchBrowser();
-    const context = await browser.newContext({
-      userAgent: DESKTOP_USER_AGENT,
-      viewport: { width: 1400, height: 1000 },
-      locale: "en-US",
-      timezoneId: "America/Los_Angeles",
-      extraHTTPHeaders: {
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua":
-          '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"macOS"',
-        "Upgrade-Insecure-Requests": "1",
-      },
-    });
-    await context.addInitScript(STEALTH_INIT);
 
-    const { hashes, addressSlug } = await extractPhotos(
-      context,
-      parsed.toString(),
-    );
+    // First attempt on the canonical URL.
+    let ctx = await browser.newContext(buildContextOptions());
+    let result = await extractOnce(ctx, target);
+    await ctx.close().catch(() => undefined);
 
-    if (hashes.length === 0) {
+    // If we got nothing but the page didn't look blocked, try one retry
+    // with a fresh context and slightly different UA fingerprint.
+    if (result.hashes.length === 0) {
+      ctx = await browser.newContext({
+        ...buildContextOptions(),
+        userAgent: DESKTOP_USER_AGENT.replace("10_15_7", "10_15_8"),
+      });
+      const retry = await extractOnce(ctx, target);
+      await ctx.close().catch(() => undefined);
+      if (retry.hashes.length > result.hashes.length) {
+        result = retry;
+      }
+    }
+
+    if (result.hashes.length === 0) {
       return NextResponse.json(
         {
-          error:
-            "Zillow blocked this request — try again in a minute, or paste the URL again.",
+          error: result.blocked
+            ? "Zillow blocked this request. Wait a minute and try again — the challenge usually clears fast."
+            : "No photos found on that page. Double-check the listing URL and try again.",
         },
         { status: 502 },
       );
     }
 
-    const photos = hashes.map(
+    const photos = result.hashes.map(
       (h) => `https://photos.zillowstatic.com/fp/${h}-cc_ft_1536.jpg`,
     );
 
-    let slug = slugFromUrl(parsed.toString());
-    if (addressSlug) {
-      const s = addressSlug
+    let slug = slugFromUrl(target);
+    if (result.addressSlug) {
+      const s = result.addressSlug
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "");
       if (s.length > 0) slug = s;
     }
 
-    return NextResponse.json({
-      photos,
-      slug,
-      sourceUrl: parsed.toString(),
-    });
+    return NextResponse.json({ photos, slug, sourceUrl: target });
   } catch (err) {
     console.error("extract error:", err);
     return NextResponse.json(
       {
         error:
-          "Zillow blocked this request — try again in a minute, or paste the URL again.",
+          "Zillow blocked this request. Wait a minute and try again — the challenge usually clears fast.",
       },
       { status: 502 },
     );
   } finally {
-    if (browser) {
-      await browser.close().catch(() => undefined);
-    }
+    if (browser) await browser.close().catch(() => undefined);
   }
 }

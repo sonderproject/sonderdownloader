@@ -8,32 +8,33 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: {
-          DEFAULT: "#141210",
-          soft: "#3B3733",
-          muted: "#7A736C",
+        bg: {
+          DEFAULT: "#0A0A09",
+          soft: "#121418",
+          deep: "#04121C",
         },
-        paper: {
-          DEFAULT: "#F3EDE3",
-          soft: "#F8F4EC",
-          deep: "#E7DFD1",
+        text: {
+          DEFAULT: "#EDE9E3",
+          dim: "rgba(237,233,227,0.62)",
+          subtle: "rgba(237,233,227,0.22)",
         },
-        ember: {
-          DEFAULT: "#B7532A",
-          soft: "#D97742",
-          deep: "#8B3E1F",
-        },
-        moss: {
-          DEFAULT: "#4A5D3A",
+        accent: {
+          DEFAULT: "#3E9BD4",
+          bright: "#6FC3F0",
+          ink: "#04121C",
         },
       },
       fontFamily: {
-        serif: ["var(--font-fraunces)", "Fraunces", "Georgia", "serif"],
+        display: ["var(--font-outfit)", "Outfit", "system-ui", "sans-serif"],
         sans: ["var(--font-inter)", "Inter", "system-ui", "sans-serif"],
       },
+      borderRadius: {
+        sonder: "4px",
+        "sonder-lg": "8px",
+      },
       letterSpacing: {
-        "wider-plus": "0.18em",
-        widest: "0.28em",
+        "wider-plus": "0.12em",
+        widest: "0.24em",
       },
     },
   },

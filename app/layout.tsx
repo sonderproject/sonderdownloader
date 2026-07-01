@@ -1,12 +1,12 @@
-import type { Metadata } from "next";
-import { Fraunces, Inter } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { Outfit, Inter } from "next/font/google";
 import "./globals.css";
 
-const fraunces = Fraunces({
+const outfit = Outfit({
   subsets: ["latin"],
-  variable: "--font-fraunces",
+  variable: "--font-outfit",
   display: "swap",
-  weight: ["400", "500", "600", "700"],
+  weight: ["300", "400", "500", "600", "700"],
 });
 
 const inter = Inter({
@@ -16,9 +16,13 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Sonder Studio — Real Estate Downloader",
+  title: "Sonder Project — Real Estate Downloader",
   description:
-    "Every listing photo, at full resolution. A stateless utility for feeding AI video generators.",
+    "Every listing photo, at full resolution. A Sonder Project utility for feeding AI video generators.",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0A0A09",
 };
 
 export default function RootLayout({
@@ -27,7 +31,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className={`${fraunces.variable} ${inter.variable}`}>
+    <html lang="en" className={`${outfit.variable} ${inter.variable}`}>
       <body className="font-sans antialiased">{children}</body>
     </html>
   );

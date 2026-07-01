@@ -40,41 +40,13 @@ import {
   DEFAULT_VIDEO_OPTIONS,
 } from "@/lib/video";
 import type { ClassifyProgress } from "@/lib/classify";
+import { extractListing, SOURCE_LABEL } from "@/lib/sources";
 
 type Photo = {
   id: string;
   url: string;
   room: RoomKey;
 };
-
-const PHOTO_HASH_RE =
-  /photos\.zillowstatic\.com\\?\/fp\\?\/([a-zA-Z0-9]{8,})-cc_ft_\d+\.(?:jpg|webp)/g;
-
-function extractHashesFromHtml(html: string): string[] {
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  for (const m of html.matchAll(PHOTO_HASH_RE)) {
-    if (!seen.has(m[1])) {
-      seen.add(m[1]);
-      ordered.push(m[1]);
-    }
-  }
-  return ordered;
-}
-
-function slugFromZillowText(text: string): string {
-  const m = text.match(/\/homedetails\/([a-zA-Z0-9-]+)/);
-  if (m) return m[1].toLowerCase();
-  return "listing";
-}
-
-// Rebuild the canonical listing URL from page source so the zip's
-// Referer header points at the real listing, not the zillow.com root.
-function sourceUrlFromHtml(text: string): string | undefined {
-  const m = text.match(/\/homedetails\/([a-zA-Z0-9-]+)\/(\d+)_zpid/);
-  if (m) return `https://www.zillow.com/homedetails/${m[1]}/${m[2]}_zpid/`;
-  return undefined;
-}
 
 // If the text is a single zillow.com URL, return it normalized; else null.
 function asZillowUrl(text: string): string | null {
@@ -89,6 +61,29 @@ function asZillowUrl(text: string): string | null {
 }
 
 const SESSION_KEY = "sonder-session-v1";
+const HISTORY_KEY = "sonder-history-v1";
+
+type HistoryEntry = {
+  slug: string;
+  sourceUrl?: string;
+  photos: Photo[];
+  ts: number;
+};
+
+// Zip entry name: index plus the room label once classified, so the
+// archive reads 03_kitchen.jpg instead of photo_03.jpg.
+function zipEntryName(p: Photo, i: number, width: number): string {
+  const n = String(i + 1).padStart(width, "0");
+  return p.room === "unknown" ? `photo_${n}.jpg` : `${n}_${p.room}.jpg`;
+}
+
+function buildPromptsText(photos: Photo[], slug: string): string {
+  const lines = photos.map(
+    (p, i) =>
+      `${String(i + 1).padStart(2, "0")} · ${ROOM_LABEL[p.room]}\n${promptFor(p.room)}\n`,
+  );
+  return `Sonder walkthrough — ${slug}\n\n${lines.join("\n")}`;
+}
 
 function hashesToPhotos(hashes: string[]): Photo[] {
   return hashes.map((h) => ({
@@ -102,10 +97,12 @@ function PhotoCard({
   photo,
   index,
   onRoomChange,
+  onRemove,
 }: {
   photo: Photo;
   index: number;
   onRoomChange: (id: string, room: RoomKey) => void;
+  onRemove: (id: string) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: photo.id });
@@ -144,8 +141,18 @@ function PhotoCard({
         <span className="absolute top-2 left-2 microlabel text-[9px] text-text bg-black/60 px-2 py-1 rounded-sonder">
           {String(index + 1).padStart(2, "0")}
         </span>
+        <button
+          type="button"
+          onClick={() => onRemove(photo.id)}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute top-2 right-2 w-6 h-6 flex items-center justify-center rounded-full bg-black/60 text-text-dim hover:text-text hover:bg-black/85 text-base leading-none transition"
+          title="Remove this photo from the set"
+          aria-label={`Remove photo ${index + 1}`}
+        >
+          ×
+        </button>
         {photo.room !== "unknown" && (
-          <span className="absolute top-2 right-2 microlabel text-[9px] text-text bg-accent/80 px-2 py-1 rounded-sonder">
+          <span className="absolute bottom-2 right-2 microlabel text-[9px] text-text bg-accent/80 px-2 py-1 rounded-sonder">
             {ROOM_LABEL[photo.room]}
           </span>
         )}
@@ -180,6 +187,11 @@ export default function Home() {
   const [sourceUrl, setSourceUrl] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<"bookmarklet" | "prompts" | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+  const [trashed, setTrashed] = useState<Photo[]>([]);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [scrollTick, setScrollTick] = useState(0);
+  const gridRef = useRef<HTMLDivElement | null>(null);
 
   // Video generation state
   const [videoBusy, setVideoBusy] = useState(false);
@@ -209,6 +221,25 @@ export default function Home() {
     };
   }, []);
 
+  // Extraction is instant — without visible feedback it reads as
+  // "nothing happened." Flash a confirmation and scroll to the grid.
+  const flashAndScroll = useCallback((message: string) => {
+    setFlash(message);
+    setScrollTick((t) => t + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 4000);
+    return () => clearTimeout(t);
+  }, [flash]);
+
+  useEffect(() => {
+    if (scrollTick > 0) {
+      gridRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [scrollTick]);
+
   // Bookmarklet drop-in: read hashes from the URL fragment.
   const ingestFragment = useCallback((): boolean => {
     const hash = window.location.hash;
@@ -225,11 +256,15 @@ export default function Home() {
     setSourceUrl(
       src && /^https:\/\/(www\.)?zillow\.com\//i.test(src) ? src : undefined,
     );
+    setTrashed([]);
     setVideoResult(null);
     setError(null);
-    history.replaceState(null, "", window.location.pathname);
+    window.history.replaceState(null, "", window.location.pathname);
+    flashAndScroll(
+      `✓ ${hashes.length} photo${hashes.length === 1 ? "" : "s"} extracted — ${s}`,
+    );
     return true;
-  }, []);
+  }, [flashAndScroll]);
 
   // On mount: fragment wins; otherwise restore the previous session so
   // a refresh doesn't lose photo order and room labels. Also listen for
@@ -273,17 +308,66 @@ export default function Home() {
     }
   }, [photos, slug, sourceUrl]);
 
-  // Ingest raw page source: extract photos, slug, and source URL.
-  const ingestHtml = useCallback((html: string): boolean => {
-    const hashes = extractHashesFromHtml(html);
-    if (hashes.length === 0) return false;
-    setPhotos(hashesToPhotos(hashes));
-    setSlug(slugFromZillowText(html));
-    setSourceUrl(sourceUrlFromHtml(html));
-    setVideoResult(null);
-    setError(null);
-    return true;
+  // Recent-listings history lives in localStorage so it survives the
+  // tab. Load once on mount…
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setHistory(
+          parsed.filter(
+            (e): e is HistoryEntry =>
+              !!e && typeof e.slug === "string" && Array.isArray(e.photos),
+          ),
+        );
+      }
+    } catch {
+      // Corrupt history — start fresh.
+    }
   }, []);
+
+  // …and upsert the current listing (including order + labels) on change.
+  useEffect(() => {
+    if (photos.length === 0) return;
+    setHistory((prev) => {
+      const entry: HistoryEntry = { slug, sourceUrl, photos, ts: Date.now() };
+      const next = [entry, ...prev.filter((e) => e.slug !== slug)].slice(0, 8);
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+      } catch {
+        // Best-effort.
+      }
+      return next;
+    });
+  }, [photos, slug, sourceUrl]);
+
+  // Ingest raw page source from any supported listing site: extract
+  // photos, slug, and canonical URL.
+  const ingestHtml = useCallback(
+    (html: string): boolean => {
+      const listing = extractListing(html);
+      if (!listing) return false;
+      setPhotos(
+        listing.photos.map((u) => ({
+          id: u,
+          url: u,
+          room: "unknown" as RoomKey,
+        })),
+      );
+      setSlug(listing.slug);
+      setSourceUrl(listing.sourceUrl);
+      setTrashed([]);
+      setVideoResult(null);
+      setError(null);
+      flashAndScroll(
+        `✓ ${listing.photos.length} photo${listing.photos.length === 1 ? "" : "s"} extracted from ${SOURCE_LABEL[listing.source]} — ${listing.slug}`,
+      );
+      return true;
+    },
+    [flashAndScroll],
+  );
 
   const extractFromUrl = useCallback(async (target: string) => {
     if (!target) return;
@@ -310,12 +394,16 @@ export default function Home() {
       setPhotos(hashesToPhotos(hashes));
       setSlug(data.slug || "listing");
       setSourceUrl(data.sourceUrl);
+      setTrashed([]);
+      flashAndScroll(
+        `✓ ${hashes.length} photo${hashes.length === 1 ? "" : "s"} extracted — ${data.slug || "listing"}`,
+      );
     } catch {
       setError("Network error. Try the Paste flow instead.");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [flashAndScroll]);
 
   // Route pasted text to the right flow: a Zillow URL hits the URL
   // pipeline, page source is extracted instantly. Returns true if handled.
@@ -368,7 +456,7 @@ export default function Home() {
     }
     if (!ingestText(pastedHtml)) {
       setError(
-        "No Zillow photo URLs found in that HTML. Make sure you pasted the full page source from a listing detail page.",
+        "No listing photos found in that HTML. Make sure you pasted the full page source of a Zillow, Redfin, or Realtor.com listing detail page.",
       );
       return;
     }
@@ -403,13 +491,18 @@ export default function Home() {
     setZipping(true);
     setZipBytes(0);
     try {
+      const width = Math.max(2, String(photos.length).length);
       const res = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          photos: photos.map((p) => p.url),
+          photos: photos.map((p, i) => ({
+            url: p.url,
+            name: zipEntryName(p, i, width),
+          })),
           slug,
-          sourceUrl: sourceUrl || "https://www.zillow.com/",
+          sourceUrl,
+          prompts: buildPromptsText(photos, slug),
         }),
       });
       if (!res.ok) {
@@ -460,6 +553,41 @@ export default function Home() {
     );
   }
 
+  // Junk shots (floor plans, plat maps, duplicate angles) get a one-
+  // click ×; removals are recoverable until the next extraction.
+  function handleRemovePhoto(id: string) {
+    const p = photos.find((x) => x.id === id);
+    if (!p) return;
+    setTrashed((t) => [...t, p]);
+    setPhotos((items) => items.filter((x) => x.id !== id));
+  }
+
+  function handleRestoreTrashed() {
+    setPhotos((items) => [...items, ...trashed]);
+    setTrashed([]);
+  }
+
+  function loadHistoryEntry(e: HistoryEntry) {
+    setPhotos(e.photos);
+    setSlug(e.slug);
+    setSourceUrl(e.sourceUrl);
+    setTrashed([]);
+    setVideoResult(null);
+    setError(null);
+    flashAndScroll(
+      `✓ Loaded ${e.photos.length} photo${e.photos.length === 1 ? "" : "s"} — ${e.slug}`,
+    );
+  }
+
+  function clearHistory() {
+    setHistory([]);
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+    } catch {
+      // Best-effort.
+    }
+  }
+
   async function handleAutoClassify() {
     if (classifyBusy || photos.length === 0) return;
     setError(null);
@@ -473,11 +601,14 @@ export default function Home() {
         setClassifyProgress,
       );
       const byId = new Map(results.map((r) => [r.id, r.room]));
+      // Label, then drop straight into walkthrough order — one click
+      // takes a raw paste to a presentation-ready sequence.
       setPhotos((items) =>
-        items.map((p) =>
-          byId.has(p.id) ? { ...p, room: byId.get(p.id)! } : p,
-        ),
+        items
+          .map((p) => (byId.has(p.id) ? { ...p, room: byId.get(p.id)! } : p))
+          .sort((a, b) => walkthroughRank(a.room) - walkthroughRank(b.room)),
       );
+      setFlash("✓ Photos classified and sorted into walkthrough order");
     } catch (err) {
       setError(
         err instanceof Error
@@ -497,11 +628,7 @@ export default function Home() {
   }
 
   async function handleCopyPrompts() {
-    const lines = photos.map(
-      (p, i) =>
-        `${String(i + 1).padStart(2, "0")} · ${ROOM_LABEL[p.room]}\n${promptFor(p.room)}\n`,
-    );
-    const text = `Sonder walkthrough — ${slug}\n\n${lines.join("\n")}`;
+    const text = buildPromptsText(photos, slug);
     try {
       await navigator.clipboard.writeText(text);
       setCopied("prompts");
@@ -573,6 +700,11 @@ export default function Home() {
 
   return (
     <main className="min-h-screen w-full flex flex-col text-text">
+      {flash && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 glass px-5 py-3 text-sm font-sans text-text border border-accent/40 whitespace-nowrap">
+          {flash}
+        </div>
+      )}
       <nav className="w-full px-6 md:px-14 pt-8">
         <div className="max-w-[1100px] mx-auto flex items-center justify-between">
           <a
@@ -619,9 +751,10 @@ export default function Home() {
             </span>
           </h1>
           <p className="mt-6 font-sans text-text-dim max-w-2xl text-base md:text-lg leading-relaxed">
-            Grab every photo from a Zillow listing, order them into a
-            walkthrough, and render a cinematic Ken-Burns video — all in your
-            browser. Prompts ready to hand to Kling, Higgsfield, or Runway.
+            Grab every photo from a Zillow, Redfin, or Realtor.com listing,
+            order them into a walkthrough, and render a cinematic Ken-Burns
+            video — all in your browser. Prompts ready to hand to Kling,
+            Higgsfield, or Runway.
           </p>
 
           <div className="mt-10 flex gap-2 border-b border-white/10">
@@ -647,7 +780,7 @@ export default function Home() {
             <form onSubmit={handlePasteSubmit} className="mt-8">
               <div className="glass p-5 md:p-6">
                 <label htmlFor="paste" className="microlabel block mb-3">
-                  Zillow Page Source
+                  Listing Page Source — Zillow · Redfin · Realtor.com
                 </label>
                 <textarea
                   id="paste"
@@ -657,7 +790,7 @@ export default function Home() {
                     setPastedHtml(e.target.value)
                   }
                   onPaste={handleTextareaPaste}
-                  placeholder="Paste the page source — or just a Zillow URL — extraction starts instantly…"
+                  placeholder="Paste the page source of a Zillow, Redfin, or Realtor.com listing — extraction starts instantly…"
                   spellCheck={false}
                   className="w-full h-40 px-4 py-3 bg-black/25 border border-white/10 rounded-sonder-lg text-text placeholder:text-text-subtle font-mono text-xs leading-relaxed focus:outline-none focus:border-accent/60 focus:ring-2 focus:ring-accent/20 transition"
                 />
@@ -743,6 +876,33 @@ export default function Home() {
             </form>
           )}
 
+          {history.length > 0 && (
+            <div className="mt-6">
+              <p className="microlabel mb-2">Recent listings</p>
+              <div className="flex flex-wrap gap-2 items-center">
+                {history.slice(0, 6).map((e) => (
+                  <button
+                    key={e.slug}
+                    type="button"
+                    onClick={() => loadHistoryEntry(e)}
+                    className="btn-ghost !px-3 !py-2 text-[10px]"
+                    title={`Load ${e.photos.length} photos`}
+                  >
+                    {e.slug.length > 36 ? `${e.slug.slice(0, 36)}…` : e.slug} ·{" "}
+                    {e.photos.length}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={clearHistory}
+                  className="microlabel text-[10px] opacity-60 hover:opacity-100 px-2 py-2 transition"
+                >
+                  clear
+                </button>
+              </div>
+            </div>
+          )}
+
           {error && (
             <div className="mt-6 glass px-5 py-4 border-l-2 border-l-accent text-text-dim text-sm font-sans max-w-2xl leading-relaxed">
               {error}
@@ -750,7 +910,7 @@ export default function Home() {
           )}
 
           {hasPhotos && (
-            <div className="mt-16">
+            <div className="mt-16" ref={gridRef}>
               <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-5 mb-6">
                 <div>
                   <p className="eyebrow mb-3">Photos</p>
@@ -767,9 +927,9 @@ export default function Home() {
                   onClick={handleAutoClassify}
                   disabled={classifyBusy}
                   className="btn-primary"
-                  title="Auto-label each photo by room using CLIP (in-browser, ~150 MB one-time download)"
+                  title="Auto-label each photo by room and sort into walkthrough order (in-browser CLIP, ~150 MB one-time download)"
                 >
-                  {classifyBusy ? "Classifying…" : "Auto-classify Photos"}
+                  {classifyBusy ? "Classifying…" : "Classify & Sort"}
                 </button>
                 <button
                   onClick={handleSortWalkthrough}
@@ -778,6 +938,15 @@ export default function Home() {
                 >
                   Sort to Walkthrough
                 </button>
+                {trashed.length > 0 && (
+                  <button
+                    onClick={handleRestoreTrashed}
+                    className="btn-ghost"
+                    title="Bring back the photos you removed with ×"
+                  >
+                    Restore {trashed.length} removed
+                  </button>
+                )}
                 <button
                   onClick={handleDownloadZip}
                   disabled={zipping}
@@ -799,9 +968,12 @@ export default function Home() {
               </div>
 
               <p className="microlabel text-[10px] opacity-80 mb-4">
-                Auto-classify labels every photo. Then drag tiles or click Sort
-                to Walkthrough. First run downloads a ~150 MB vision model
-                (cached forever).
+                Classify &amp; Sort labels every photo and orders the
+                walkthrough in one click — then fine-tune by dragging tiles.
+                × removes junk shots (floor plans, maps) from the zip and
+                video. First run downloads a ~150 MB vision model (cached
+                forever). Zip filenames include room labels, plus a
+                prompts.txt ready for Kling / Higgsfield / Runway.
               </p>
 
               {classifyBusy && classifyProgress && (
@@ -841,6 +1013,7 @@ export default function Home() {
                         photo={p}
                         index={i}
                         onRoomChange={handleRoomChange}
+                        onRemove={handleRemovePhoto}
                       />
                     ))}
                   </div>

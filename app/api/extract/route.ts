@@ -67,10 +67,8 @@ function collectHashes(source: string): string[] {
   return ordered;
 }
 
-// ─── STRATEGY 1: Wayback Machine ────────────────────────────────────
-// Zero bot detection. Photo hashes in the archived HTML still resolve
-// on photos.zillowstatic.com today because Zillow doesn't rotate them.
-async function tryWayback(
+// ─── STRATEGY 1a: existing Wayback snapshot ─────────────────────────
+async function tryWaybackExisting(
   targetUrl: string,
 ): Promise<{ hashes: string[]; note: string }> {
   const availUrl =
@@ -87,18 +85,50 @@ async function tryWayback(
   if (!closest?.available || !closest.timestamp) {
     return { hashes: [], note: "no-snapshot" };
   }
-
-  // "id_" identifier delivers the raw archived response (unwrapped by
-  // archive.org's toolbar frame), so photo URLs sit in the HTML clean.
   const rawUrl = `https://web.archive.org/web/${closest.timestamp}id_/${targetUrl}`;
   const rawRes = await fetch(rawUrl, {
     headers: { "User-Agent": DESKTOP_USER_AGENT },
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(20_000),
   });
   if (!rawRes.ok) return { hashes: [], note: "raw-http-" + rawRes.status };
   const html = await rawRes.text();
-  const hashes = collectHashes(html);
-  return { hashes, note: `wayback-${closest.timestamp}` };
+  return { hashes: collectHashes(html), note: `wayback-${closest.timestamp}` };
+}
+
+// ─── STRATEGY 1b: on-demand Wayback snapshot ────────────────────────
+// If no existing snapshot, ask Wayback to fetch one now. archive.org
+// requests Zillow from its own IPs — not Vercel's — and Wayback has
+// historically been able to fetch Zillow past PerimeterX. The response
+// often returns the archived HTML inline; if not, we re-check the
+// availability API after a short wait.
+async function tryWaybackSave(
+  targetUrl: string,
+): Promise<{ hashes: string[]; note: string }> {
+  const saveUrl = "https://web.archive.org/save/" + targetUrl;
+  const saveRes = await fetch(saveUrl, {
+    method: "GET",
+    redirect: "follow",
+    headers: {
+      "User-Agent": DESKTOP_USER_AGENT,
+      Accept: "text/html,application/xhtml+xml",
+    },
+    signal: AbortSignal.timeout(50_000),
+  });
+  if (saveRes.ok) {
+    const html = await saveRes.text();
+    const hashes = collectHashes(html);
+    if (hashes.length > 0) return { hashes, note: "wayback-save-inline" };
+  }
+  // Wayback fanned out but didn't return the HTML directly. Poll the
+  // availability API for the freshly-created snapshot.
+  for (let i = 0; i < 3; i++) {
+    await new Promise((r) => setTimeout(r, 2_500));
+    const r = await tryWaybackExisting(targetUrl);
+    if (r.hashes.length > 0) {
+      return { hashes: r.hashes, note: `wayback-save-poll-${i}` };
+    }
+  }
+  return { hashes: [], note: "wayback-save-empty" };
 }
 
 // ─── STRATEGY 2: ZenRows (only if API key set) ─────────────────────
@@ -173,13 +203,6 @@ const STEALTH_INIT = `
 
 async function launchBrowser(): Promise<Browser> {
   const isLocal = !process.env.VERCEL && !process.env.AWS_REGION;
-  const stealthArgs = [
-    "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process,Translate",
-    "--disable-dev-shm-usage",
-    "--no-default-browser-check",
-    "--no-first-run",
-  ];
 
   if (isLocal) {
     return playwrightChromium.launch({
@@ -188,14 +211,24 @@ async function launchBrowser(): Promise<Browser> {
         process.env.CHROMIUM_EXECUTABLE_PATH ||
         process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
         undefined,
-      args: stealthArgs,
+      args: ["--disable-blink-features=AutomationControlled"],
     });
   }
 
+  // @sparticuz/chromium-min needs these toggles for a lightweight
+  // serverless boot; without them the binary tries to bring up graphics
+  // that the Vercel sandbox can't provide and dies on launch.
+  chromiumPack.setHeadlessMode = true;
+  chromiumPack.setGraphicsMode = false;
+
   const packUrl = process.env.CHROMIUM_PACK_URL || DEFAULT_CHROMIUM_PACK;
   const executablePath = await chromiumPack.executablePath(packUrl);
+
+  // Just append AutomationControlled — DO NOT override the pack's
+  // --disable-features list (chromium collapses duplicate --disable-features
+  // to the *last* value and the pack's list is load-bearing on serverless).
   return playwrightChromium.launch({
-    args: [...chromiumPack.args, ...stealthArgs],
+    args: [...chromiumPack.args, "--disable-blink-features=AutomationControlled"],
     executablePath,
     headless: true,
   });
@@ -336,37 +369,41 @@ async function handle(rawUrl: string | undefined) {
 
   const notes: string[] = [];
 
-  // 1. Wayback — fastest, most reliable, no bot check.
+  // 1a. Wayback — existing snapshot (fastest, no browser).
   try {
-    const r = await tryWayback(target);
+    const r = await tryWaybackExisting(target);
     notes.push(r.note);
-    if (r.hashes.length > 0) {
-      return respond(r.hashes, target, notes);
-    }
+    if (r.hashes.length > 0) return respond(r.hashes, target, notes);
   } catch (err) {
-    console.warn("wayback failed:", err);
-    notes.push("wayback-throw");
+    console.warn("wayback-existing failed:", err);
+    notes.push("wayback-existing-throw");
+  }
+
+  // 1b. Wayback — save on demand (archive.org's own IPs fetch Zillow).
+  try {
+    const r = await tryWaybackSave(target);
+    notes.push(r.note);
+    if (r.hashes.length > 0) return respond(r.hashes, target, notes);
+  } catch (err) {
+    console.warn("wayback-save failed:", err);
+    notes.push("wayback-save-throw");
   }
 
   // 2. ZenRows if key set.
   try {
     const r = await tryZenRows(target);
     if (r.note !== "no-key") notes.push(r.note);
-    if (r.hashes.length > 0) {
-      return respond(r.hashes, target, notes);
-    }
+    if (r.hashes.length > 0) return respond(r.hashes, target, notes);
   } catch (err) {
     console.warn("zenrows failed:", err);
     notes.push("zenrows-throw");
   }
 
-  // 3. Playwright direct — the last resort. Often blocked on Vercel IPs.
+  // 3. Playwright direct — often blocked on Vercel IPs.
   try {
     const r = await tryPlaywright(target);
     notes.push(r.note);
-    if (r.hashes.length > 0) {
-      return respond(r.hashes, target, notes);
-    }
+    if (r.hashes.length > 0) return respond(r.hashes, target, notes);
   } catch (err) {
     console.warn("playwright throw:", err);
     notes.push("playwright-throw");

@@ -927,30 +927,99 @@ export default function Home() {
 
       <section className="flex-1 px-6 md:px-14 pt-16 md:pt-20 pb-24">
         <div className="max-w-[1100px] mx-auto">
-          <p className="eyebrow mb-5">Instructions</p>
-          <h1 className="font-display text-text text-5xl md:text-7xl leading-[0.98] tracking-tight font-medium max-w-3xl">
-            Paste the listing,
-            <br />
-            get every{" "}
-            <span
-              style={{
-                background:
-                  "linear-gradient(180deg, #6FC3F0 0%, #3E9BD4 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}
-            >
-              photo.
-            </span>
-          </h1>
-          <p className="mt-6 font-sans text-text-dim max-w-2xl text-base md:text-lg leading-relaxed">
-            1. Open the Zillow, Redfin, or Realtor.com listing in another
-            tab. 2. Right-click → View Page Source (or Ctrl/Cmd+U) → select
-            all → copy. 3. Paste anywhere on this page — extraction runs
-            instantly. Then classify by room, reorder, and download a zip
-            or Ken-Burns video with AI prompts included.
-          </p>
+          <div className="text-center flex flex-col items-center">
+            <p className="eyebrow mb-5">Instructions</p>
+            <h1 className="font-display text-text text-5xl md:text-7xl leading-[0.98] tracking-tight font-medium max-w-3xl">
+              Paste the listing,
+              <br />
+              get every{" "}
+              <span
+                style={{
+                  background:
+                    "linear-gradient(180deg, #6FC3F0 0%, #3E9BD4 100%)",
+                  WebkitBackgroundClip: "text",
+                  WebkitTextFillColor: "transparent",
+                  backgroundClip: "text",
+                }}
+              >
+                photo.
+              </span>
+            </h1>
+
+            <ol className="mt-8 font-sans text-text-dim max-w-xl text-left text-base leading-relaxed space-y-4">
+              <li className="flex gap-3">
+                <span className="font-display text-accent-bright font-medium">
+                  1.
+                </span>
+                <span>
+                  Open the <strong className="text-text">Zillow</strong>,{" "}
+                  <strong className="text-text">Redfin</strong>, or{" "}
+                  <strong className="text-text">Realtor.com</strong> listing
+                  you want in another browser tab.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <span className="font-display text-accent-bright font-medium">
+                  2.
+                </span>
+                <span>
+                  Right-click anywhere on that page →{" "}
+                  <strong className="text-text">View Page Source</strong>{" "}
+                  (or press <strong className="text-text">Ctrl/Cmd + U</strong>
+                  ), then select all (
+                  <strong className="text-text">Ctrl/Cmd + A</strong>) and
+                  copy (<strong className="text-text">Ctrl/Cmd + C</strong>).
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <span className="font-display text-accent-bright font-medium">
+                  3.
+                </span>
+                <span>
+                  Come back to this tab and{" "}
+                  <strong className="text-text">
+                    paste anywhere on the page
+                  </strong>{" "}
+                  (Ctrl/Cmd + V) — no need to click into a field first.
+                  Extraction runs instantly and every photo loads at max
+                  resolution.
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <span className="font-display text-accent-bright font-medium">
+                  4.
+                </span>
+                <span>
+                  Hit <strong className="text-text">Classify & Sort</strong>{" "}
+                  to auto-label each photo by room and order them into a
+                  walkthrough — or drag photos manually and use the{" "}
+                  <strong className="text-text">×</strong> to remove junk
+                  (floor plans, plat maps, duplicates).
+                </span>
+              </li>
+              <li className="flex gap-3">
+                <span className="font-display text-accent-bright font-medium">
+                  5.
+                </span>
+                <span>
+                  Download the{" "}
+                  <strong className="text-text">
+                    room-labeled zip
+                  </strong>{" "}
+                  (with captions + AI video prompts included), or render the
+                  in-browser{" "}
+                  <strong className="text-text">Ken-Burns walkthrough video</strong>{" "}
+                  — nothing leaves your browser.
+                </span>
+              </li>
+            </ol>
+
+            <p className="mt-6 microlabel text-[10px] opacity-70 max-w-xl">
+              No listing to paste? Drag the bookmarklet below for one-click
+              extraction on any Zillow tab, or upload your own photos to use
+              the same tools.
+            </p>
+          </div>
 
           <div className="mt-10 flex gap-2 border-b border-white/10">
             {(["paste", "url"] as const).map((m) => (

@@ -37,9 +37,14 @@ export function SimulatorScene(props: SimulatorSceneProps) {
   const [phaseIdx, setPhaseIdx] = useState(props.phases.length - 1);
   const [after, setAfter] = useState(true);
   const [ctaOpen, setCtaOpen] = useState(false);
+  const [sceneReady, setSceneReady] = useState(false);
+  const [isTouch, setIsTouch] = useState(false);
 
   useEffect(() => {
+    setIsTouch("ontouchstart" in window);
     let disposed = false;
+    // Textures can stall on slow CDNs — never gate the scene forever.
+    const failSafe = setTimeout(() => setSceneReady(true), 7000);
     (async () => {
       const { createViewer } = await import("@/lib/spatial/viewer");
       if (disposed || !mountRef.current) return;
@@ -47,6 +52,7 @@ export function SimulatorScene(props: SimulatorSceneProps) {
         media: props.media,
         hotspots: props.hotspots,
         onLockChange: setLocked,
+        onSceneReady: () => setSceneReady(true),
       });
       handleRef.current.setPhaseRatio(
         props.phases.length > 1 ? phaseIdx / (props.phases.length - 1) : 1,
@@ -54,6 +60,7 @@ export function SimulatorScene(props: SimulatorSceneProps) {
     })();
     return () => {
       disposed = true;
+      clearTimeout(failSafe);
       handleRef.current?.dispose();
       handleRef.current = null;
     };
@@ -182,18 +189,51 @@ export function SimulatorScene(props: SimulatorSceneProps) {
         </button>
       </div>
 
+      {/* Scene loading overlay */}
+      {!sceneReady && (
+        <div className="absolute inset-0 z-40 bg-[#0A0A09] flex items-center justify-center">
+          <div className="text-center">
+            <p className="eyebrow mb-3">Sonder Simulation</p>
+            <p className="text-text font-display text-xl mb-4">
+              Building scene…
+            </p>
+            <div className="h-0.5 w-40 mx-auto bg-white/10 rounded-full overflow-hidden">
+              <div className="h-full w-1/2 bg-accent animate-pulse" />
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Movement hint */}
-      {!locked && !touring && (
+      {sceneReady && !locked && !touring && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
           <div className="glass px-6 py-4 text-center">
             <p className="text-text text-sm font-sans">
-              Click to look around
+              {isTouch ? "Drag to look around" : "Click to look around"}
             </p>
             <p className="microlabel text-[9px] mt-1 opacity-70">
-              WASD to walk · ESC to release
+              {isTouch
+                ? "Hold WALK to move"
+                : "WASD to walk · Shift to sprint · ESC to release"}
             </p>
           </div>
         </div>
+      )}
+
+      {/* Touch: hold-to-walk */}
+      {isTouch && (
+        <button
+          className="absolute bottom-28 right-6 z-30 w-20 h-20 rounded-full glass !p-0 flex items-center justify-center microlabel text-[10px] text-accent-bright select-none touch-none"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            handleRef.current?.setWalk(true);
+          }}
+          onPointerUp={() => handleRef.current?.setWalk(false)}
+          onPointerLeave={() => handleRef.current?.setWalk(false)}
+          onPointerCancel={() => handleRef.current?.setWalk(false)}
+        >
+          WALK
+        </button>
       )}
 
       {/* Bottom: timeline + before/after + CTA */}

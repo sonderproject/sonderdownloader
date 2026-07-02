@@ -99,17 +99,17 @@ class LocalStorageStore implements SpatialStore {
     const id = newId("prj");
     const now = Date.now();
     const media = input.media ?? [];
+    const uniqueLabels = Array.from(
+      new Set(media.map((m) => m.label).filter((l): l is string => !!l)),
+    ).slice(0, 8);
     const hotspots: Hotspot[] = input.seedRoomHotspots
-      ? media
-          .filter((m) => m.label)
-          .slice(0, 6)
-          .map((m, i) => ({
-            id: newId("hs"),
-            projectId: id,
-            title: m.label!,
-            hotspotType: "room_label" as const,
-            position: autoPosition(i),
-          }))
+      ? uniqueLabels.map((label, i) => ({
+          id: newId("hs"),
+          projectId: id,
+          title: label,
+          hotspotType: "room_label" as const,
+          position: autoPosition(i),
+        }))
       : [];
     const project: Project = {
       id,

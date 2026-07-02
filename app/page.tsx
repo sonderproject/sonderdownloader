@@ -927,11 +927,11 @@ export default function Home() {
 
       <section className="flex-1 px-6 md:px-14 pt-16 md:pt-20 pb-24">
         <div className="max-w-[1100px] mx-auto">
-          <p className="eyebrow mb-5">Utility № 001</p>
+          <p className="eyebrow mb-5">Instructions</p>
           <h1 className="font-display text-text text-5xl md:text-7xl leading-[0.98] tracking-tight font-medium max-w-3xl">
-            Every listing photo,
+            Paste the listing,
             <br />
-            at{" "}
+            get every{" "}
             <span
               style={{
                 background:
@@ -941,14 +941,15 @@ export default function Home() {
                 backgroundClip: "text",
               }}
             >
-              full resolution.
+              photo.
             </span>
           </h1>
           <p className="mt-6 font-sans text-text-dim max-w-2xl text-base md:text-lg leading-relaxed">
-            Grab every photo from a Zillow, Redfin, or Realtor.com listing,
-            order them into a walkthrough, and render a cinematic Ken-Burns
-            video — all in your browser. Prompts ready to hand to Kling,
-            Higgsfield, or Runway.
+            1. Open the Zillow, Redfin, or Realtor.com listing in another
+            tab. 2. Right-click → View Page Source (or Ctrl/Cmd+U) → select
+            all → copy. 3. Paste anywhere on this page — extraction runs
+            instantly. Then classify by room, reorder, and download a zip
+            or Ken-Burns video with AI prompts included.
           </p>
 
           <div className="mt-10 flex gap-2 border-b border-white/10">

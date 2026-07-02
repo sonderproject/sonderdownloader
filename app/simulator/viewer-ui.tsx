@@ -131,7 +131,7 @@ export function SimulatorScene(props: SimulatorSceneProps) {
           <h2 className="font-display text-text text-lg leading-snug">
             {props.title}
           </h2>
-          {props.address && (
+          {props.address && props.address !== props.title && (
             <p className="microlabel text-[9px] mt-1 opacity-70">
               {props.address}
             </p>

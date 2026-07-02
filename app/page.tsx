@@ -48,6 +48,7 @@ import {
 import { buildCaptions, captionsFileText } from "@/lib/captions";
 import { renderCoverImage, Branding } from "@/lib/cover";
 import { SIMULATOR_STAGE_KEY } from "@/lib/simulator";
+import { store as spatialStore } from "@/lib/spatial/store";
 import { useRouter } from "next/navigation";
 
 type Photo = {
@@ -672,10 +673,14 @@ export default function Home() {
     );
   }
 
-  // Stage the current set for the Property Simulator and open it.
+  // One click: create a simulator project from the current photo set —
+  // listing facts become property info, room labels become hotspots —
+  // and jump straight into generation. No re-uploading, no form.
   function handleSendToSimulator() {
     if (photos.length === 0) return;
     try {
+      // Also stage the raw payload so the manual create flow can offer
+      // "Use Staged Photos" as a fallback path.
       sessionStorage.setItem(
         SIMULATOR_STAGE_KEY,
         JSON.stringify({
@@ -690,11 +695,27 @@ export default function Home() {
           ts: Date.now(),
         }),
       );
+      const project = spatialStore.create({
+        title: facts.address || slug.replace(/-/g, " "),
+        address: facts.address,
+        projectType: "real_estate",
+        media: photos.map((p) => ({
+          id: p.id,
+          url: toRenderUrl(p.url),
+          label: p.room !== "unknown" ? ROOM_LABEL[p.room] : undefined,
+        })),
+        property: {
+          price: facts.price,
+          beds: facts.beds,
+          baths: facts.baths,
+          squareFeet: facts.sqft,
+        },
+        seedRoomHotspots: true,
+      });
+      router.push(`/simulator/projects/${project.id}/uploads?auto=1`);
     } catch {
-      setError("Could not stage photos for the simulator.");
-      return;
+      setError("Could not send photos to the simulator.");
     }
-    router.push("/simulator/projects/new?staged=1");
   }
 
   function handleDragEnd(e: DragEndEvent) {

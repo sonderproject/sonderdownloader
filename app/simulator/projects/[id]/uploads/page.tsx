@@ -1,8 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState, DragEvent, ChangeEvent } from "react";
+import {
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  DragEvent,
+  ChangeEvent,
+} from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Shell } from "../../../ui";
 import {
   GenerationMode,
@@ -25,9 +32,10 @@ import {
   ProcessingRun,
 } from "@/lib/spatial/processing";
 
-export default function UploadsPage() {
+function UploadsInner() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const params = useSearchParams();
   const [project, setProject] = useState<Project | null>(null);
   const [rejected, setRejected] = useState<string[]>([]);
   const [mode, setMode] = useState<GenerationMode | null>(null);
@@ -35,11 +43,28 @@ export default function UploadsPage() {
   const [progress, setProgress] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   const runRef = useRef<ProcessingRun | null>(null);
+  const autoStarted = useRef(false);
 
   useEffect(() => {
     setProject(store.get(id));
     return () => runRef.current?.cancel();
   }, [id]);
+
+  // Arriving from "Send to Simulator": photos are already attached —
+  // start generating immediately, no clicks needed.
+  useEffect(() => {
+    if (autoStarted.current || !project) return;
+    if (
+      params.get("auto") &&
+      project.media.length > 0 &&
+      project.status !== "ready" &&
+      state === null
+    ) {
+      autoStarted.current = true;
+      handleGenerate();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project]);
 
   if (!project) return <Shell>{null}</Shell>;
 
@@ -173,6 +198,30 @@ export default function UploadsPage() {
 
         {project.media.length > 0 && (
           <div className="glass p-6">
+            <div className="grid grid-cols-6 md:grid-cols-8 gap-1.5 mb-6">
+              {project.media.slice(0, 16).map((m) => (
+                <div
+                  key={m.id}
+                  className="aspect-[4/3] rounded-sonder overflow-hidden bg-black/40"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={m.url}
+                    alt={m.label ?? ""}
+                    loading="lazy"
+                    className="w-full h-full object-cover"
+                    onError={(e) => (e.currentTarget.style.opacity = "0.15")}
+                  />
+                </div>
+              ))}
+              {project.media.length > 16 && (
+                <div className="aspect-[4/3] rounded-sonder bg-black/40 flex items-center justify-center">
+                  <span className="microlabel text-[9px]">
+                    +{project.media.length - 16}
+                  </span>
+                </div>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-5 mb-6">
               <div>
                 <p className="microlabel mb-1">Files</p>
@@ -241,5 +290,13 @@ export default function UploadsPage() {
         )}
       </div>
     </Shell>
+  );
+}
+
+export default function UploadsPage() {
+  return (
+    <Suspense>
+      <UploadsInner />
+    </Suspense>
   );
 }

@@ -39,6 +39,9 @@ export function SimulatorScene(props: SimulatorSceneProps) {
   const [ctaOpen, setCtaOpen] = useState(false);
   const [sceneReady, setSceneReady] = useState(false);
   const [isTouch, setIsTouch] = useState(false);
+  const [mapOpen, setMapOpen] = useState(false);
+  const [mapQuery, setMapQuery] = useState("");
+  const [mapDraft, setMapDraft] = useState("");
 
   useEffect(() => {
     setIsTouch("ontouchstart" in window);
@@ -177,6 +180,18 @@ export function SimulatorScene(props: SimulatorSceneProps) {
             <button onClick={toggleTour} className="btn-ghost">
               {touring ? "Stop Tour" : "Cinematic Tour"}
             </button>
+            <button
+              onClick={() => {
+                const q = props.address || props.title;
+                setMapDraft(mapQuery || q);
+                if (!mapQuery) setMapQuery(q);
+                setMapOpen(true);
+              }}
+              className="btn-ghost"
+              title="See the property's location on Google Maps"
+            >
+              Map
+            </button>
             {props.onShare && (
               <button onClick={props.onShare} className="btn-ghost">
                 Share
@@ -278,6 +293,64 @@ export function SimulatorScene(props: SimulatorSceneProps) {
           </div>
         )}
       </div>
+
+      {mapOpen && (
+        <div
+          className="absolute inset-0 z-50 bg-black/70 flex items-center justify-center p-4 md:p-8"
+          onClick={() => setMapOpen(false)}
+        >
+          <div
+            className="glass p-4 md:p-6 w-full max-w-3xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <p className="eyebrow">Location</p>
+              <button
+                onClick={() => setMapOpen(false)}
+                className="btn-ghost !px-3 !py-2"
+              >
+                ✕
+              </button>
+            </div>
+            <form
+              className="flex gap-2 mb-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (mapDraft.trim()) setMapQuery(mapDraft.trim());
+              }}
+            >
+              <input
+                value={mapDraft}
+                onChange={(e) => setMapDraft(e.target.value)}
+                placeholder="Search an address…"
+                className="flex-1 px-3 py-2 bg-black/25 border border-white/10 rounded-sonder text-text placeholder:text-text-subtle font-sans text-sm focus:outline-none focus:border-accent/60 transition"
+              />
+              <button type="submit" className="btn-primary whitespace-nowrap">
+                Search
+              </button>
+            </form>
+            {mapQuery && (
+              <iframe
+                title="Property location"
+                src={`https://www.google.com/maps?q=${encodeURIComponent(mapQuery)}&output=embed`}
+                className="w-full h-[50vh] rounded-sonder border-0 bg-black/40"
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+              />
+            )}
+            <div className="mt-3 flex justify-end">
+              <a
+                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapQuery || props.title)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="microlabel hover:text-accent-bright transition"
+              >
+                Open in Google Maps ↗
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
 
       {ctaOpen && (
         <div

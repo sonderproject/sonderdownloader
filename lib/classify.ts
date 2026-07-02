@@ -94,9 +94,11 @@ export type ClassifyResult = {
   confidence: number;
 };
 
-// Map a public Zillow photo URL to our same-origin image proxy so the
-// browser can read pixel data without a CORS wall.
+// Map a CDN photo URL to our same-origin image proxy so the browser
+// can read pixel data without a CORS wall. Uploaded blob: photos are
+// already same-origin — pass them straight through.
 function toProxyUrl(url: string): string {
+  if (url.startsWith("blob:")) return url;
   return `/api/img?url=${encodeURIComponent(url)}`;
 }
 

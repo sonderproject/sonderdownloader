@@ -5,10 +5,11 @@ photo at max resolution as a zip, auto-labeled by room, ordered into a
 walkthrough, with AI-video prompts included. Built for feeding AI
 video generators (Kling, Higgsfield, Runway).
 
-## The two flows
+## The three flows
 
 Listing sites block server-side scrapers by IP. Your browser doesn't
-get blocked — so the extraction happens in your browser instead.
+get blocked — so the extraction happens in your browser instead. You
+can also skip extraction entirely and upload your own photos.
 
 ### 1. Paste HTML (works everywhere, no setup)
 
@@ -41,6 +42,23 @@ strategy pipeline (Wayback snapshot → scraping service if a key is
 set). Often blocked by PerimeterX on Vercel's IPs; kept only as a
 fallback for users who set up a service key.
 
+### 3. Upload your own photos
+
+Bring photos you already have — the upload card on the landing page
+(or "Add Photos" on an existing set) pulls them into the same
+pipeline: classify, video, cover, captions, simulator. Uploads are
+`blob:` object URLs that never leave the browser; they're excluded
+from session/history persistence since they can't survive a reload.
+
+## Property Simulator (staging)
+
+"Send to Simulator" stages the current photo set + listing facts in
+`sessionStorage` and opens `/simulator`, where photos can be
+included/excluded per-click. The simulation engine itself plugs into
+`lib/simulator.ts` (`SIMULATOR_PROMPT` + `runSimulation()`) — the
+page's Generate button is already wired to it and self-enables once
+a prompt is configured.
+
 ## The production kit
 
 - **Classify & Sort** — one click runs in-browser CLIP over every
@@ -59,11 +77,13 @@ fallback for users who set up a service key.
 
 ## Zip download
 
-`POST /api/download` fetches each photo server-side and streams a
-`<address-slug>.zip`. Photo URLs are validated against the CDN
-allowlist in `lib/photoHosts.ts`, each fetched with the `Referer` its
-CDN expects. No API key needed — the photo CDNs are plain CDNs. The
-UI shows live progress (MB received) while the zip streams.
+The zip is assembled **in the browser** (fflate): uploaded photos are
+read directly, CDN photos come through `/api/img` (which owns the
+Referer + size-ladder logic, validated against the allowlist in
+`lib/photoHosts.ts`). Includes `prompts.txt`, `captions.txt`, and
+`listing.txt`. Client-side assembly means no serverless time limit —
+big listings zip fine on Vercel Hobby. (`POST /api/download` remains
+as a server-side fallback endpoint.)
 
 ## Other seamlessness details
 

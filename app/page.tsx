@@ -47,12 +47,25 @@ import {
 } from "@/lib/sources";
 import { buildCaptions, captionsFileText } from "@/lib/captions";
 import { renderCoverImage, Branding } from "@/lib/cover";
+import { SIMULATOR_STAGE_KEY } from "@/lib/simulator";
+import { useRouter } from "next/navigation";
 
 type Photo = {
   id: string;
   url: string;
   room: RoomKey;
+  ext?: string; // uploaded photos keep their original extension
 };
+
+// Uploaded photos are blob: object URLs — local to this tab, never
+// proxied, never persisted (they don't survive a reload).
+function isLocalUrl(url: string): boolean {
+  return url.startsWith("blob:");
+}
+
+function toRenderUrl(url: string): string {
+  return isLocalUrl(url) ? url : `/api/img?url=${encodeURIComponent(url)}`;
+}
 
 // If the text is a single zillow.com URL, return it normalized; else null.
 function asZillowUrl(text: string): string | null {
@@ -112,7 +125,8 @@ const fieldCls =
 // archive reads 03_kitchen.jpg instead of photo_03.jpg.
 function zipEntryName(p: Photo, i: number, width: number): string {
   const n = String(i + 1).padStart(width, "0");
-  return p.room === "unknown" ? `photo_${n}.jpg` : `${n}_${p.room}.jpg`;
+  const ext = p.ext ?? "jpg";
+  return p.room === "unknown" ? `photo_${n}.${ext}` : `${n}_${p.room}.${ext}`;
 }
 
 function buildPromptsText(photos: Photo[], slug: string): string {
@@ -169,8 +183,10 @@ function PhotoCard({
           draggable={false}
           onError={(e) => {
             // The 1536 size doesn't exist for every photo — retry via the
-            // proxy, which walks the size ladder.
+            // proxy, which walks the size ladder. Local blobs have no
+            // fallback.
             const el = e.currentTarget;
+            if (photo.url.startsWith("blob:")) return;
             const proxied = `/api/img?url=${encodeURIComponent(photo.url)}`;
             if (!el.src.includes("/api/img")) el.src = proxied;
           }}
@@ -238,6 +254,7 @@ export default function Home() {
     null,
   );
   const [coverBusy, setCoverBusy] = useState(false);
+  const router = useRouter();
 
   // Video generation state
   const [videoBusy, setVideoBusy] = useState(false);
@@ -344,13 +361,15 @@ export default function Home() {
     return () => window.removeEventListener("hashchange", ingestFragment);
   }, [ingestFragment]);
 
-  // Persist the working set so refreshes are seamless.
+  // Persist the working set so refreshes are seamless. Uploaded blob
+  // photos can't survive a reload, so they're excluded.
   useEffect(() => {
-    if (photos.length === 0) return;
+    const persistable = photos.filter((p) => !isLocalUrl(p.url));
+    if (persistable.length === 0) return;
     try {
       sessionStorage.setItem(
         SESSION_KEY,
-        JSON.stringify({ photos, slug, sourceUrl, facts }),
+        JSON.stringify({ photos: persistable, slug, sourceUrl, facts }),
       );
     } catch {
       // Storage full or unavailable — persistence is best-effort.
@@ -405,12 +424,13 @@ export default function Home() {
 
   // …and upsert the current listing (including order + labels) on change.
   useEffect(() => {
-    if (photos.length === 0) return;
+    const persistable = photos.filter((p) => !isLocalUrl(p.url));
+    if (persistable.length === 0) return;
     setHistory((prev) => {
       const entry: HistoryEntry = {
         slug,
         sourceUrl,
-        photos,
+        photos: persistable,
         facts,
         ts: Date.now(),
       };
@@ -569,62 +589,112 @@ export default function Home() {
     void extractFromUrl(url.trim());
   }
 
+  // Zip is assembled in the browser: uploaded blob photos are read
+  // directly, CDN photos come through the /api/img proxy (which owns
+  // the Referer + size-ladder logic). No serverless time limit.
   async function handleDownloadZip() {
     if (photos.length === 0 || zipping) return;
     setZipping(true);
     setZipBytes(0);
+    setError(null);
     try {
+      const { zip, strToU8 } = await import("fflate");
       const width = Math.max(2, String(photos.length).length);
-      const res = await fetch("/api/download", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          photos: photos.map((p, i) => ({
-            url: p.url,
-            name: zipEntryName(p, i, width),
-          })),
-          slug,
-          sourceUrl,
-          prompts: buildPromptsText(photos, slug),
-          textFiles: [
-            { name: "captions.txt", content: captionsFileText(facts, slug) },
-            {
-              name: "listing.txt",
-              content: listingFileText(facts, slug, sourceUrl),
-            },
-          ],
-        }),
-      });
-      if (!res.ok) {
-        setError("Could not build zip. Please try again.");
+      type ZipEntry = [Uint8Array, { level: 0 | 6 }];
+      const files: Record<string, ZipEntry> = {
+        "prompts.txt": [strToU8(buildPromptsText(photos, slug)), { level: 6 }],
+        "captions.txt": [strToU8(captionsFileText(facts, slug)), { level: 6 }],
+        "listing.txt": [
+          strToU8(listingFileText(facts, slug, sourceUrl)),
+          { level: 6 },
+        ],
+      };
+      let received = 0;
+      let fetched = 0;
+      for (let i = 0; i < photos.length; i++) {
+        const p = photos[i];
+        try {
+          const res = await fetch(toRenderUrl(p.url));
+          if (!res.ok) continue;
+          const buf = new Uint8Array(await res.arrayBuffer());
+          received += buf.length;
+          setZipBytes(received);
+          // Photos are already compressed — store, don't deflate.
+          files[zipEntryName(p, i, width)] = [buf, { level: 0 }];
+          fetched++;
+        } catch {
+          // Skip photos that fail; the rest of the zip still works.
+        }
+      }
+      if (fetched === 0) {
+        setError("No photos could be fetched. Please try again.");
         return;
       }
-      // Read the stream manually so we can show live progress — the zip
-      // is streamed with no Content-Length.
-      let blob: Blob;
-      const reader = res.body?.getReader();
-      if (reader) {
-        const chunks: BlobPart[] = [];
-        let received = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            chunks.push(value);
-            received += value.length;
-            setZipBytes(received);
-          }
-        }
-        blob = new Blob(chunks, { type: "application/zip" });
-      } else {
-        blob = await res.blob();
+      const data = await new Promise<Uint8Array>((resolve, reject) =>
+        zip(files, (err, out) => (err ? reject(err) : resolve(out))),
+      );
+      triggerDownload(
+        new Blob([data as BlobPart], { type: "application/zip" }),
+        `${slug}.zip`,
+      );
+      if (fetched < photos.length) {
+        setFlash(
+          `✓ Zip ready — ${photos.length - fetched} photo${photos.length - fetched === 1 ? "" : "s"} skipped`,
+        );
       }
-      triggerDownload(blob, `${slug}.zip`);
     } catch {
       setError("Could not build zip. Please try again.");
     } finally {
       setZipping(false);
     }
+  }
+
+  function handleUploadChange(e: ChangeEvent<HTMLInputElement>) {
+    const list = Array.from(e.target.files ?? []).filter((f) =>
+      f.type.startsWith("image/"),
+    );
+    e.target.value = "";
+    if (list.length === 0) return;
+    const stamp = Date.now();
+    const added: Photo[] = list.map((f, i) => ({
+      id: `local-${stamp}-${i}-${f.name}`,
+      url: URL.createObjectURL(f),
+      room: "unknown" as RoomKey,
+      ext: (f.name.match(/\.([a-zA-Z0-9]+)$/)?.[1] ?? "jpg").toLowerCase(),
+    }));
+    const wasEmpty = photos.length === 0;
+    setPhotos((ps) => [...ps, ...added]);
+    if (wasEmpty && slug === "listing") setSlug("my-photos");
+    setVideoResult(null);
+    setError(null);
+    flashAndScroll(
+      `✓ ${added.length} photo${added.length === 1 ? "" : "s"} added`,
+    );
+  }
+
+  // Stage the current set for the Property Simulator and open it.
+  function handleSendToSimulator() {
+    if (photos.length === 0) return;
+    try {
+      sessionStorage.setItem(
+        SIMULATOR_STAGE_KEY,
+        JSON.stringify({
+          photos: photos.map((p) => ({
+            id: p.id,
+            url: toRenderUrl(p.url),
+            room: p.room,
+          })),
+          facts,
+          slug,
+          sourceUrl,
+          ts: Date.now(),
+        }),
+      );
+    } catch {
+      setError("Could not stage photos for the simulator.");
+      return;
+    }
+    router.push("/simulator");
   }
 
   function handleDragEnd(e: DragEndEvent) {
@@ -754,7 +824,7 @@ export default function Home() {
       // pixel access (the CDN sends no CORS headers) and falls back to
       // smaller sizes when 1536 is missing.
       const result = await renderWalkthroughVideo(
-        photos.map((p) => `/api/img?url=${encodeURIComponent(p.url)}`),
+        photos.map((p) => toRenderUrl(p.url)),
         {
           width: w,
           height: h,
@@ -800,7 +870,7 @@ export default function Home() {
     setError(null);
     try {
       const blob = await renderCoverImage(
-        `/api/img?url=${encodeURIComponent(photos[0].url)}`,
+        toRenderUrl(photos[0].url),
         facts,
         branding,
       );
@@ -1027,6 +1097,26 @@ export default function Home() {
             </form>
           )}
 
+          <div className="mt-6 glass p-5 md:p-6">
+            <p className="microlabel mb-3">Or — start from your own photos</p>
+            <p className="text-text-dim text-sm leading-relaxed mb-4">
+              Already have listing photos? Upload them and use everything
+              here — classify, walkthrough video, cover image, captions,
+              simulator.
+            </p>
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handleUploadChange}
+              className="block w-full max-w-md text-xs text-text-dim file:mr-3 file:px-4 file:py-2.5 file:rounded-sonder file:border-0 file:bg-accent/20 file:text-text file:text-xs file:uppercase file:tracking-widest file:cursor-pointer"
+            />
+            <p className="mt-3 microlabel text-[9px] opacity-70">
+              Photos stay in your browser — nothing is uploaded to a server.
+              They live for this tab only; refresh clears them.
+            </p>
+          </div>
+
           {history.length > 0 && (
             <div className="mt-6">
               <p className="microlabel mb-2">Recent listings</p>
@@ -1082,6 +1172,26 @@ export default function Home() {
                 >
                   {classifyBusy ? "Classifying…" : "Classify & Sort"}
                 </button>
+                <button
+                  onClick={handleSendToSimulator}
+                  className="btn-primary"
+                  title="Stage this photo set for the Property Simulator"
+                >
+                  Send to Simulator →
+                </button>
+                <label
+                  className="btn-ghost cursor-pointer"
+                  title="Add your own photos to this set"
+                >
+                  Add Photos
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleUploadChange}
+                    className="hidden"
+                  />
+                </label>
                 <button
                   onClick={handleSortWalkthrough}
                   className="btn-ghost"

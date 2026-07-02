@@ -33,7 +33,13 @@ world. Input quality routes to the right pipeline:
 3. **Guided Tour Fallback Path** — standard listing photos with weak
    overlap → guided cinematic pseudo-3D walkthrough: photo nodes in a
    spatial gallery, smooth camera moves, room labels (auto-seeded from
-   the downloader's CLIP classifier), and hotspots.
+   the downloader's CLIP classifier), and hotspots. Each room's lead
+   photo is additionally lifted to a **depth-displaced 3D diorama**
+   using in-browser monocular depth estimation (Depth Anything small
+   via transformers.js, `lib/spatial/depth.ts`) — real parallax from a
+   single photo, no API key, model cached from the HF CDN like the
+   CLIP classifier. Failure at any point leaves the flat curved
+   backdrop in place.
 
 `ProcessingService.detectProjectInputType()` and
 `estimateCaptureQuality()` pick the default path; the user can

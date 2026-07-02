@@ -42,6 +42,9 @@ export function SimulatorScene(props: SimulatorSceneProps) {
   const [mapOpen, setMapOpen] = useState(false);
   const [mapQuery, setMapQuery] = useState("");
   const [mapDraft, setMapDraft] = useState("");
+  const [depth, setDepth] = useState<{ done: number; total: number } | null>(
+    null,
+  );
 
   useEffect(() => {
     setIsTouch("ontouchstart" in window);
@@ -56,6 +59,8 @@ export function SimulatorScene(props: SimulatorSceneProps) {
         hotspots: props.hotspots,
         onLockChange: setLocked,
         onSceneReady: () => setSceneReady(true),
+        onDepthProgress: (done, total) =>
+          setDepth(done < 0 || done >= total ? null : { done, total }),
       });
       handleRef.current.setPhaseRatio(
         props.phases.length > 1 ? phaseIdx / (props.phases.length - 1) : 1,
@@ -232,6 +237,16 @@ export function SimulatorScene(props: SimulatorSceneProps) {
                 : "WASD to walk · Shift to sprint · ESC to release"}
             </p>
           </div>
+        </div>
+      )}
+
+      {/* Depth enhancement progress */}
+      {depth && !presenting && (
+        <div className="absolute bottom-28 left-5 glass px-4 py-2.5 pointer-events-none">
+          <p className="microlabel text-[9px]">
+            <span className="text-accent-bright">◆</span> Adding 3D depth to
+            rooms… {depth.done}/{depth.total}
+          </p>
         </div>
       )}
 

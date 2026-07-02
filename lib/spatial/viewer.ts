@@ -11,6 +11,7 @@
 // walls. Hotspots snap into the room they mention.
 
 import * as THREE from "three";
+import type { DepthGrid } from "./depth";
 
 export type ViewerMedia = { url: string; label?: string };
 
@@ -26,6 +27,9 @@ export type ViewerOptions = {
   hotspots: ViewerHotspot[];
   onLockChange?: (locked: boolean) => void;
   onSceneReady?: () => void;
+  // In-browser depth enhancement (no API key; model from HF CDN).
+  enableDepth?: boolean;
+  onDepthProgress?: (done: number, total: number) => void;
 };
 
 export type ViewerHandle = {
@@ -474,6 +478,7 @@ export function createViewer(
   const roomEdgeMat = track(
     new THREE.LineBasicMaterial({ color: ACCENT, transparent: true, opacity: 0.3 }),
   );
+  const roomBackdrops = new Map<Room, THREE.Mesh>();
 
   function panelSlots(r: Room): { pos: THREE.Vector3; rotY: number }[] {
     const slots: { pos: THREE.Vector3; rotY: number }[] = [];
@@ -544,6 +549,8 @@ export function createViewer(
 
     // Immersive backdrop: the room's lead photo on a curved surround
     // hugging the outer wall — stand in the room and it fills your view.
+    // Upgraded in place to a depth-displaced 3D mesh when the depth
+    // model finishes with this photo.
     if (r.photos.length > 0) {
       const arc = 1.9;
       const radius = Math.min(r.w, r.d) * 0.52;
@@ -562,6 +569,7 @@ export function createViewer(
       const cyl = new THREE.Mesh(cylGeo, cylMat);
       cyl.position.set(r.cx, 1.55, r.cz);
       scene.add(cyl);
+      roomBackdrops.set(r, cyl);
     }
 
     // Remaining photos framed on the room's walls.
@@ -577,6 +585,71 @@ export function createViewer(
     scene.add(fill);
   }
   if (opts.media.length === 0) setTimeout(fireReady, 50);
+
+  // ── Depth enhancement: photos → volumetric dioramas ──────────────
+  // Runs entirely in the browser (Depth Anything via transformers.js,
+  // no API key). Each finished room swaps its curved backdrop for a
+  // depth-displaced mesh with real parallax. Any failure leaves the
+  // curved fallback in place.
+  let disposed = false;
+
+  function addDepthDiorama(r: Room, grid: DepthGrid) {
+    const w = Math.min(r.w - 1.2, 8.5);
+    const h = Math.min(2.95, w / grid.aspect);
+    const segX = grid.width - 1;
+    const segY = grid.height - 1;
+    const geo = track(new THREE.PlaneGeometry(w, h, segX, segY));
+    const pos = geo.attributes.position;
+    const depthScale = Math.min(3.4, r.w * 0.34);
+    for (let i = 0; i < pos.count; i++) {
+      const ix = i % (segX + 1);
+      const iy = Math.floor(i / (segX + 1));
+      pos.setZ(i, grid.data[iy * grid.width + ix] * depthScale);
+    }
+    pos.needsUpdate = true;
+    geo.computeBoundingSphere();
+
+    const mat = track(new THREE.MeshBasicMaterial({ color: 0x141a20 }));
+    loadInto(mat, r.photos[0].url);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(r.cx + r.side * (r.w / 2 - 0.35), h / 2 + 0.25, r.cz);
+    mesh.rotation.y = -r.side * (Math.PI / 2);
+    scene.add(mesh);
+
+    const old = roomBackdrops.get(r);
+    if (old) scene.remove(old);
+    roomBackdrops.delete(r);
+  }
+
+  async function enhanceRoomsWithDepth() {
+    const targets = rooms.filter((r) => roomBackdrops.has(r));
+    const total = targets.length;
+    if (total === 0) return;
+    let done = 0;
+    opts.onDepthProgress?.(0, total);
+    let estimateDepthGrid: typeof import("./depth").estimateDepthGrid;
+    try {
+      ({ estimateDepthGrid } = await import("./depth"));
+    } catch {
+      opts.onDepthProgress?.(-1, total);
+      return;
+    }
+    for (const r of targets) {
+      if (disposed) return;
+      try {
+        const grid = await estimateDepthGrid(r.photos[0].url);
+        if (disposed) return;
+        addDepthDiorama(r, grid);
+      } catch (err) {
+        console.warn("depth enhancement unavailable:", err);
+        opts.onDepthProgress?.(-1, total);
+        return;
+      }
+      done++;
+      opts.onDepthProgress?.(done, total);
+    }
+  }
+  if (opts.enableDepth !== false) void enhanceRoomsWithDepth();
 
   // ── Hotspots: snap into the room they mention ────────────────────
   const hotspotMeshes: THREE.Mesh[] = [];
@@ -829,6 +902,7 @@ export function createViewer(
 
   return {
     dispose() {
+      disposed = true;
       cancelAnimationFrame(raf);
       document.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("keyup", onKeyUp);

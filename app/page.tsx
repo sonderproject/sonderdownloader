@@ -47,9 +47,6 @@ import {
 } from "@/lib/sources";
 import { buildCaptions, captionsFileText } from "@/lib/captions";
 import { renderCoverImage, Branding } from "@/lib/cover";
-import { SIMULATOR_STAGE_KEY } from "@/lib/simulator";
-import { store as spatialStore } from "@/lib/spatial/store";
-import { useRouter } from "next/navigation";
 
 type Photo = {
   id: string;
@@ -255,7 +252,6 @@ export default function Home() {
     null,
   );
   const [coverBusy, setCoverBusy] = useState(false);
-  const router = useRouter();
 
   // Video generation state
   const [videoBusy, setVideoBusy] = useState(false);
@@ -673,50 +669,6 @@ export default function Home() {
     );
   }
 
-  // One click: create a simulator project from the current photo set —
-  // listing facts become property info, room labels become hotspots —
-  // and jump straight into generation. No re-uploading, no form.
-  function handleSendToSimulator() {
-    if (photos.length === 0) return;
-    try {
-      // Also stage the raw payload so the manual create flow can offer
-      // "Use Staged Photos" as a fallback path.
-      sessionStorage.setItem(
-        SIMULATOR_STAGE_KEY,
-        JSON.stringify({
-          photos: photos.map((p) => ({
-            id: p.id,
-            url: toRenderUrl(p.url),
-            room: p.room,
-          })),
-          facts,
-          slug,
-          sourceUrl,
-          ts: Date.now(),
-        }),
-      );
-      const project = spatialStore.create({
-        title: facts.address || slug.replace(/-/g, " "),
-        address: facts.address,
-        projectType: "real_estate",
-        media: photos.map((p) => ({
-          id: p.id,
-          url: toRenderUrl(p.url),
-          label: p.room !== "unknown" ? ROOM_LABEL[p.room] : undefined,
-        })),
-        property: {
-          price: facts.price,
-          beds: facts.beds,
-          baths: facts.baths,
-          squareFeet: facts.sqft,
-        },
-        seedRoomHotspots: true,
-      });
-      router.push(`/simulator/projects/${project.id}/uploads?auto=1`);
-    } catch {
-      setError("Could not send photos to the simulator.");
-    }
-  }
 
   function handleDragEnd(e: DragEndEvent) {
     const { active, over } = e;
@@ -1122,8 +1074,7 @@ export default function Home() {
             <p className="microlabel mb-3">Or — start from your own photos</p>
             <p className="text-text-dim text-sm leading-relaxed mb-4">
               Already have listing photos? Upload them and use everything
-              here — classify, walkthrough video, cover image, captions,
-              simulator.
+              here — classify, walkthrough video, cover image, captions.
             </p>
             <input
               type="file"
@@ -1192,13 +1143,6 @@ export default function Home() {
                   title="Auto-label each photo by room and sort into walkthrough order (in-browser CLIP, ~150 MB one-time download)"
                 >
                   {classifyBusy ? "Classifying…" : "Classify & Sort"}
-                </button>
-                <button
-                  onClick={handleSendToSimulator}
-                  className="btn-primary"
-                  title="Stage this photo set for the Property Simulator"
-                >
-                  Send to Simulator →
                 </button>
                 <label
                   className="btn-ghost cursor-pointer"

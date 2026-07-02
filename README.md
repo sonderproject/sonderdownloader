@@ -46,18 +46,9 @@ fallback for users who set up a service key.
 
 Bring photos you already have — the upload card on the landing page
 (or "Add Photos" on an existing set) pulls them into the same
-pipeline: classify, video, cover, captions, simulator. Uploads are
+pipeline: classify, video, cover, captions. Uploads are
 `blob:` object URLs that never leave the browser; they're excluded
 from session/history persistence since they can't survive a reload.
-
-## Property Simulator (staging)
-
-"Send to Simulator" stages the current photo set + listing facts in
-`sessionStorage` and opens `/simulator`, where photos can be
-included/excluded per-click. The simulation engine itself plugs into
-`lib/simulator.ts` (`SIMULATOR_PROMPT` + `runSimulation()`) — the
-page's Generate button is already wired to it and self-enables once
-a prompt is configured.
 
 ## The production kit
 

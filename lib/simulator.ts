@@ -1,14 +1,13 @@
-// Property Simulator — integration point.
+// Bridge between the downloader and Sonder Simulation.
 //
-// The /simulator page stages photos + listing facts here. When the
-// simulator prompt is ready, drop it into SIMULATOR_PROMPT below and
-// implement runSimulation(); the page's Generate button is already
-// wired to call it with the user's selection.
+// "Send to Simulator" on the main page stages the current photo set +
+// listing facts under this key; /simulator/projects/new picks it up
+// and pre-fills a new project (photos become gallery media, room
+// labels become hotspots, facts become property info).
 
 import type { ListingFacts } from "./sources";
 import type { RoomKey } from "./rooms";
 
-// sessionStorage key the main page writes and /simulator reads.
 export const SIMULATOR_STAGE_KEY = "sonder-simulator-v1";
 
 export type SimulatorPhoto = {
@@ -24,31 +23,3 @@ export type SimulatorStage = {
   sourceUrl?: string;
   ts: number;
 };
-
-export type SimulatorInput = {
-  photos: SimulatorPhoto[]; // the user's selection, walkthrough order
-  facts: ListingFacts;
-  slug: string;
-};
-
-export type SimulatorResult = {
-  // Shape TBD by the simulator prompt — e.g. generated image URLs,
-  // a video blob, or a text report.
-  outputs: unknown[];
-};
-
-// ── PASTE THE SIMULATOR PROMPT HERE ─────────────────────────────────
-export const SIMULATOR_PROMPT = "";
-
-export function simulatorReady(): boolean {
-  return SIMULATOR_PROMPT.trim().length > 0;
-}
-
-export async function runSimulation(
-  input: SimulatorInput,
-): Promise<SimulatorResult> {
-  void input;
-  throw new Error(
-    "Simulator prompt not configured yet — add it to lib/simulator.ts.",
-  );
-}

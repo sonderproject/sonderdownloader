@@ -694,7 +694,7 @@ export default function Home() {
       setError("Could not stage photos for the simulator.");
       return;
     }
-    router.push("/simulator");
+    router.push("/simulator/projects/new?staged=1");
   }
 
   function handleDragEnd(e: DragEndEvent) {
